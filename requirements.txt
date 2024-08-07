@@ -1,0 +1,4 @@
+faster_whisper
+ffmpeg-python
+loguru
+PyYAML
