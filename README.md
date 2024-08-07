@@ -54,6 +54,7 @@ automatically selects the best encoding parameters based on video content and de
 
     ```bash
     python -O main.py --processes 1 --move-raw-file --manual-mode # you can also modify # of processes, depending on how powerful your environmet is.
+- If you want more message shown in console, remove -O option (change to debug mode).
 - other options can be found in main.py
 
 3. Check logs:
