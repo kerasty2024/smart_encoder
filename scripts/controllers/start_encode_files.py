@@ -6,7 +6,6 @@ from pathlib import Path
 
 from loguru import logger
 
-from scripts.controllers.functions import format_timedelta, formatted_size
 from scripts.models.Encoder import VideoEncoder
 from scripts.models.Log import SuccessLog
 from scripts.models.MediaFile import MediaFile
@@ -23,6 +22,7 @@ def start_encode_video_files_multi_process(path: Path, args: argparse.Namespace 
     """
     logger.debug(f"Starting video encoding in path: {path}")
     process_files = ProcessVideoFiles(path, args)
+    pre_and_post_actions(process_files, path)
 
     if not process_files.source_dir:
         logger.info("No source directory found, exiting process.")
@@ -62,7 +62,7 @@ def start_encode_video_files_multi_process(path: Path, args: argparse.Namespace 
         tb_str = traceback.format_exception(etype=type(e), value=e, tb=e.__traceback__)
         logger.error(f"An unexpected error occurred: {e}\nTraceback: {''.join(tb_str)}")
 
-    post_actions(process_files, path)
+    pre_and_post_actions(process_files, path)
 
 
 def start_encode_video_file(file_path: Path, args: argparse.Namespace):
@@ -77,12 +77,7 @@ def start_encode_video_file(file_path: Path, args: argparse.Namespace):
         video_encoder = VideoEncoder(media_file, args)
         logger.debug(f"Starting encoding for file: {file_path}")
         video_encoder.start()
-        logger.success(
-            f"encoded {file_path}, "
-            f"duration: {format_timedelta(video_encoder.total_time)}, "
-            f"encoded size: {formatted_size(video_encoder.encoded_file.stat().st_size)}"
-            f"({int(video_encoder.encoded_file.stat().st_size / video_encoder.pre_encoder.media_file.size) * 100}%)"
-        )
+
     except Exception as e:
         tb_str = traceback.format_exception(etype=type(e), value=e, tb=e.__traceback__)
         logger.error(
@@ -91,23 +86,23 @@ def start_encode_video_file(file_path: Path, args: argparse.Namespace):
         raise
 
 
-def post_actions(process_files: ProcessVideoFiles, path: Path):
+def pre_and_post_actions(process_files: ProcessVideoFiles, path: Path):
     """
-    Performs cleanup and logging actions after processing files.
+    Performs cleanup and logging actions before and after processing files.
 
     :param process_files: The object managing the video file processes.
     :param path: The original path of the video files.
     """
     try:
-        logger.debug("Performing post-processing actions.")
+        logger.debug("Performing pre & post processing actions.")
         process_files.remove_empty_dirs()
         process_files.delete_temp_folders()
         process_files.move_raw_folder_if_no_process_files(
             Path(VIDEO_OUT_DIR_ROOT).resolve()
         )
         SuccessLog.generate_combined_log_yaml(path)
-        logger.info("Post-processing actions completed.")
+        logger.info("pre & post processing actions completed.")
     except Exception as e:
         tb_str = traceback.format_exception(etype=type(e), value=e, tb=e.__traceback__)
-        logger.error(f"Post-processing failed: {e}\nTraceback: {''.join(tb_str)}")
+        logger.error(f"pre & post processing actions failed: {e}\nTraceback: {''.join(tb_str)}")
         raise

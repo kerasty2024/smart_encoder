@@ -201,7 +201,10 @@ class Encoder:
             self.move_raw_file()
 
         logger.success(
-            f"Completed: {self.original_media_file.path.relative_to(Path.cwd())} ({format_timedelta(self.total_time)})"
+            f"Completed: {self.original_media_file.path.relative_to(Path.cwd())}, "
+            f"total time: {format_timedelta(self.total_time)}, "
+            f"{formatted_size(self.original_media_file.size)} -> {formatted_size(self.encoded_file.stat().st_size)} "
+            f"({int((self.encoded_file.stat().st_size / self.original_media_file.size) * 100)}%)"
         )
 
     def set_encoded_comment(self):

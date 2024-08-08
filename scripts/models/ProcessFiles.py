@@ -69,7 +69,7 @@ class ProcessFiles:
             d.resolve()
             for d in search_pattern
             if d.is_dir()
-               and (self.args.manual_mode or not contains_excluded_keywords(d))
+            and (self.args.manual_mode or not contains_excluded_keywords(d))
         ]
         self.dirs = set(dirs)
 
@@ -181,7 +181,7 @@ class ProcessFiles:
 
     @classmethod
     def get_relative_root_dir(
-            cls, root_dir: Path = Path.cwd(), target_path: Path = None
+        cls, root_dir: Path = Path.cwd(), target_path: Path = None
     ) -> str:
         """
         Returns the relative path of the target_path with respect to root_dir.
