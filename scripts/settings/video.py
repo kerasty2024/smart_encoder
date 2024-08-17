@@ -46,6 +46,7 @@ VIDEO_ABAV1_ERROR_TAG = "_abav1_error"
 # Error Directories
 VIDEO_CRF_CHECK_ERROR_DIR = BASE_ERROR_DIR / "crf_check_error"
 VIDEO_NO_AUDIO_FOUND_ERROR_DIR = BASE_ERROR_DIR / "no_audio_found"
+NO_DURATION_FOUND_ERROR_DIR = BASE_ERROR_DIR / "no_duration_found"
 
 # Keywords for Exclusion
 EXCEPT_FOLDERS_KEYWORDS = (

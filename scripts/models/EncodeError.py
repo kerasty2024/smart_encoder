@@ -26,3 +26,9 @@ class SkippedVideoFileError(PreVideoEncoderError):
     """Exception raised when no video file need to be pre-encoded."""
 
     pass
+
+
+class NoDurationFoundError(PreVideoEncoderError):
+    """Exception raised when no duration info got."""
+
+    pass

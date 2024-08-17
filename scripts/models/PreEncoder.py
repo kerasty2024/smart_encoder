@@ -72,7 +72,7 @@ class PreEncoder:
     renamed_file: Path = None
 
     def __init__(
-            self, media_file: Optional[MediaFile] = None, manual_mode: bool = False
+        self, media_file: Optional[MediaFile] = None, manual_mode: bool = False
     ):
         """
         Initializes the PreEncoder object.
@@ -87,7 +87,7 @@ class PreEncoder:
             Path("")
             if media_file is None
             else Path(VIDEO_OUT_DIR_ROOT)
-                 / Path(Path(media_file.path).parent.relative_to(Path.cwd()))
+            / Path(Path(media_file.path).parent.relative_to(Path.cwd()))
         )
         self.skip_log = (
             self.encoded_dir / Path("skipped.txt") if media_file else Path("")
@@ -124,8 +124,8 @@ class PreEncoder:
         if self.comment_encoded in self.media_file.comment:
             log_word = f"Skipped because already encoded: {self.media_file.path}"
         elif (
-                contains_any_extensions(self.over_sized_tags, self.media_file.path)
-                and not self.manual_mode
+            contains_any_extensions(self.over_sized_tags, self.media_file.path)
+            and not self.manual_mode
         ):
             log_word = f"Skipped because this file will be oversized when encoded: {self.media_file.path}"
         elif self.bit_rate <= self.bit_rate_threshold:
@@ -139,7 +139,7 @@ class PreEncoder:
             logger.error(f"No streams found in: {self.media_file.path}")
             self.media_file.load_failed_dir.mkdir(parents=True, exist_ok=True)
             self.renamed_file = (
-                    self.media_file.load_failed_dir / self.media_file.filename
+                self.media_file.load_failed_dir / self.media_file.filename
             )
             self.renamed_file.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(self.media_file.path, self.renamed_file)
@@ -173,7 +173,7 @@ class PreVideoEncoder(PreEncoder):
     """
 
     def __init__(
-            self, media_file: Optional[MediaFile] = None, manual_mode: bool = False
+        self, media_file: Optional[MediaFile] = None, manual_mode: bool = False
     ):
         """
         Initialize the PreVideoEncoder with a media file and optional manual mode.
@@ -340,7 +340,7 @@ class PreVideoEncoder(PreEncoder):
         """
         self.error_dir = Path(BASE_ERROR_DIR) / dir_name / media_file.relative_dir
         self.renamed_file = self.error_dir / media_file.filename
-        self.error_dir.mkdir(parents=True, exist_ok=True)
+        self.error_dir.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(media_file.path, self.renamed_file)
 
     def set_output_streams(self):
@@ -363,8 +363,8 @@ class PreVideoEncoder(PreEncoder):
             video_stream
             for video_stream in self.media_file.video_streams
             if "avg_frame_rate" in video_stream
-               and "codec_name" in video_stream
-               and video_stream["codec_name"] not in SKIP_VIDEO_CODEC_NAMES
+            and "codec_name" in video_stream
+            and video_stream["codec_name"] not in SKIP_VIDEO_CODEC_NAMES
         ]
 
     def set_output_audio_streams(self):
@@ -441,7 +441,7 @@ class PreVideoEncoder(PreEncoder):
             stream
             for stream in self.media_file.subtitle_streams
             if "language" in stream
-               and any(
+            and any(
                 language_word in stream["language"].lower()
                 for language_word in LANGUAGE_WORDS
             )

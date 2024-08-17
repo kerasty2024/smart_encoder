@@ -1,16 +1,18 @@
 import argparse
 import concurrent.futures
 import random
+import shutil
 import traceback
 from pathlib import Path
 
 from loguru import logger
 
+from scripts.models.EncodeError import NoDurationFoundError
 from scripts.models.Encoder import VideoEncoder
 from scripts.models.Log import SuccessLog
 from scripts.models.MediaFile import MediaFile
 from scripts.models.ProcessFiles import ProcessVideoFiles
-from scripts.settings.video import VIDEO_OUT_DIR_ROOT
+from scripts.settings.video import VIDEO_OUT_DIR_ROOT, NO_DURATION_FOUND_ERROR_DIR
 
 
 def start_encode_video_files_multi_process(path: Path, args: argparse.Namespace = None):
@@ -32,7 +34,7 @@ def start_encode_video_files_multi_process(path: Path, args: argparse.Namespace 
 
     try:
         with concurrent.futures.ProcessPoolExecutor(
-                max_workers=args.processes
+            max_workers=args.processes
         ) as executor:
             files_to_process = process_files.files
             if args.random:
@@ -77,7 +79,11 @@ def start_encode_video_file(file_path: Path, args: argparse.Namespace):
         video_encoder = VideoEncoder(media_file, args)
         logger.debug(f"Starting encoding for file: {file_path}")
         video_encoder.start()
-
+    except NoDurationFoundError:  # raised by media_file initialization
+        to_dir = NO_DURATION_FOUND_ERROR_DIR / file_path.relative_to(Path.cwd())
+        to_dir.mkdir(parents=True, exist_ok=True)
+        shutil.move(file_path, to_dir)
+        logger.error(f"Failed to find duration: {file_path}")
     except Exception as e:
         tb_str = traceback.format_exception(etype=type(e), value=e, tb=e.__traceback__)
         logger.error(
@@ -104,5 +110,7 @@ def pre_and_post_actions(process_files: ProcessVideoFiles, path: Path):
         logger.info("pre & post processing actions completed.")
     except Exception as e:
         tb_str = traceback.format_exception(etype=type(e), value=e, tb=e.__traceback__)
-        logger.error(f"pre & post processing actions failed: {e}\nTraceback: {''.join(tb_str)}")
+        logger.error(
+            f"pre & post processing actions failed: {e}\nTraceback: {''.join(tb_str)}"
+        )
         raise

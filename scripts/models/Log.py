@@ -1,3 +1,4 @@
+import os
 import random
 import re
 import string
@@ -123,7 +124,11 @@ class SuccessLog(Log):
         """
         if self.file.is_file():
             with self.file.open("r", encoding="utf-8") as f:
-                self.contents = yaml.safe_load(f) or []
+                try:
+                    self.contents = yaml.full_load(f) or []
+                except yaml.constructor.ConstructorError:
+                    os.remove(f)
+
         index = len(self.contents) + 1
         log_dic.update({"index": index})
         self.contents.append(log_dic)
@@ -168,7 +173,7 @@ class SuccessLog(Log):
                     }
                     for same_date_log_file in same_date_log_files:
                         with same_date_log_file.open("r", encoding="utf-8") as _f:
-                            _contents.extend(yaml.safe_load(_f) or [])
+                            _contents.extend(yaml.full_load(_f) or [])
                         same_date_log_file.unlink()  # Remove individual log file after reading
                     with (_dir / f"log_{date}.yaml").open("w", encoding="utf-8") as _f:
                         yaml.dump(
@@ -191,7 +196,7 @@ class SuccessLog(Log):
         for log_file in log_files:
             log_dirs.add(log_file.parent)
             with log_file.open("r", encoding="utf-8") as f:
-                contents.extend(yaml.safe_load(f) or [])
+                contents.extend(yaml.full_load(f) or [])
             log_file.unlink()  # Remove individual log file after reading
 
         combine_yaml_in_single_folder(log_dirs)

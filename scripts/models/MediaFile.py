@@ -1,11 +1,28 @@
 import hashlib
+import re
 import shutil
 from pathlib import Path
 
 import ffmpeg
 from loguru import logger
 
+from scripts.models.EncodeError import NoDurationFoundError
 from scripts.settings.common import LOAD_FAILED_LOG, LOAD_FAILED_DIR
+
+
+def parse_duration(duration):
+    """Parse a duration string formatted as 'HH:MM:SS.sss' into seconds."""
+    try:
+        return float(duration)
+    except ValueError:
+        pattern = r"(?:(\d+):)?(\d+):(\d+.\d+)"
+        match = re.match(pattern, duration)
+        if match:
+            hours = int(match.group(1)) if match.group(1) else 0
+            minutes = int(match.group(2))
+            seconds = float(match.group(3))
+            return hours * 3600 + minutes * 60 + seconds
+    return 0.0
 
 
 class MediaFile:
@@ -55,7 +72,7 @@ class MediaFile:
         self.relative_dir: Path = self.path.relative_to(Path.cwd()).resolve()
         self.size: int = self.path.stat().st_size
         self.probe = None
-        self.duration = 0
+        self.duration: float = 0  # in seconds
         self.comment = ""
         self.video_stream_count = 0
         self.video_streams = []
@@ -68,6 +85,7 @@ class MediaFile:
 
         # errors
         self.load_failed_dir: Path = Path(LOAD_FAILED_DIR) / self.relative_dir
+
         self.set_probe()
         self.set_duration()
         self.set_video_stream_count()
@@ -130,23 +148,63 @@ class MediaFile:
 
     def set_duration(self):
         """
-        Sets the duration of the media file from the probe data. Raises an error if duration cannot be determined.
-
-        :return: None
+        Sets the duration of the media file from the probe data.
+        Raises an error if duration cannot be determined.
         """
         if not self.probe:
-            return
-        streams = self.probe.get("streams", [])
-        self.duration = max(
-            (
-                float(stream.get("duration", 0))
-                for stream in streams
-                if "duration" in stream
-            ),
-            default=0,
-        )
+            raise NoDurationFoundError(f"No probe data found for file {self.path}")
+
+        # Attempt to find duration in format or streams
+        duration_sources = [
+            self.probe.get("format", {}),
+            *self.probe.get("streams", []),
+        ]
+
+        for source in duration_sources:
+            for key in ["duration", "DURATION"]:
+                if key in source:
+                    self.duration = parse_duration(source[key])
+                    if self.duration > 0:
+                        return
+
+        # Fallback: Calculate duration by decoding frames
+        self.duration = self.calculate_duration_by_decoding()
+
         if self.duration <= 0:
-            raise ValueError(f"Failed to get duration! {self.path}")
+            raise NoDurationFoundError(f"Failed to get duration! {self.path}")
+
+    def calculate_duration_by_decoding(self):
+        """Calculate video duration by decoding frames using ffmpeg."""
+        try:
+            video_stream = next(
+                (
+                    stream
+                    for stream in self.probe["streams"]
+                    if stream["codec_type"] == "video"
+                ),
+                None,
+            )
+
+            if not video_stream:
+                return 0.0
+
+            # Get the average frame rate
+            avg_frame_rate = video_stream.get("avg_frame_rate")
+            if not avg_frame_rate:
+                return 0.0
+            num, denom = map(int, avg_frame_rate.split("/"))
+            frame_rate = num / denom
+
+            # Get the number of frames
+            nb_frames = int(video_stream.get("nb_frames", 0))
+            if nb_frames > 0:
+                return nb_frames / frame_rate
+
+        except ffmpeg.Error as e:
+            print(f"An error occurred while decoding frames: {e}")
+            return 0.0
+
+        return 0.0
 
     def set_comment(self):
         """
