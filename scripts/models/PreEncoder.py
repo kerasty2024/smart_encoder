@@ -10,15 +10,15 @@ from scripts.controllers.functions import (
     run_cmd,
     format_timedelta,
     detect_audio_language_multi_segments,
-    contains_any_extensions,
-)
-from scripts.models.EncodeError import (
-    CRFSearchFailedError,
-    SkippedVideoFileError,
-    UnexpectedPreEncoderError,
-    NoAudioStreamError,
 )
 from scripts.models.MediaFile import MediaFile
+from scripts.models.PreVideoEncodeExceptions import (
+    CRFSearchFailedException,
+    SkippedVideoFileException,
+    UnexpectedPreEncoderException,
+    NoAudioStreamException, FileAlreadyEncodedException, FileOversizedException, BitRateTooLowException,
+    FormatExcludedException, NoStreamsFoundException,
+)
 from scripts.models.TempFile import EncodeInfo
 from scripts.settings.common import BASE_ERROR_DIR, LANGUAGE_WORDS
 from scripts.settings.video import (
@@ -72,7 +72,7 @@ class PreEncoder:
     renamed_file: Path = None
 
     def __init__(
-        self, media_file: Optional[MediaFile] = None, manual_mode: bool = False
+            self, media_file: Optional[MediaFile] = None, manual_mode: bool = False
     ):
         """
         Initializes the PreEncoder object.
@@ -87,7 +87,7 @@ class PreEncoder:
             Path("")
             if media_file is None
             else Path(VIDEO_OUT_DIR_ROOT)
-            / Path(Path(media_file.path).parent.relative_to(Path.cwd()))
+                 / Path(Path(media_file.path).parent.relative_to(Path.cwd()))
         )
         self.skip_log = (
             self.encoded_dir / Path("skipped.txt") if media_file else Path("")
@@ -114,42 +114,56 @@ class PreEncoder:
 
     def skip_unneeded_file(self):
         """
-        Determines if the media file should be skipped based on predefined criteria.
-        Moves skipped files to the appropriate directory and logs the reason for skipping.
+        Evaluates whether the media file should be skipped based on various criteria.
+
+        Raises:
+            FileAlreadyEncodedException: If the file is already encoded.
+            FileOversizedException: If the file will be oversized when encoded and manual mode is off.
+            BitRateTooLowException: If the file's bitrate is below the threshold.
+            FormatExcludedException: If the file's format is excluded from processing.
+            NoStreamsFoundException: If no streams are found in the media file.
+
+        On raising any of these exceptions, the file is moved to the appropriate directory and
+        logged. The exceptions are then caught and handled, with the file being renamed and moved
+        to the appropriate directory.
         """
         if not self.media_file:
             return
 
-        log_word = ""
-        if self.comment_encoded in self.media_file.comment:
-            log_word = f"Skipped because already encoded: {self.media_file.path}"
-        elif (
-            contains_any_extensions(self.over_sized_tags, self.media_file.path)
-            and not self.manual_mode
-        ):
-            log_word = f"Skipped because this file will be oversized when encoded: {self.media_file.path}"
-        elif self.bit_rate <= self.bit_rate_threshold:
-            log_word = (
-                f"Skipped because bitrate below threshold "
-                f"({VIDEO_BITRATE_LOW_THRESHOLD}): {self.media_file.path}"
-            )
-        elif self.media_file.vcodec in EXCEPT_FORMAT:
-            log_word = f"Skipped because format is excluded ({self.media_file.vcodec}): {self.media_file.path}"
-        elif self.encode_stream_count == 0:
-            logger.error(f"No streams found in: {self.media_file.path}")
-            self.media_file.load_failed_dir.mkdir(parents=True, exist_ok=True)
-            self.renamed_file = (
-                self.media_file.load_failed_dir / self.media_file.filename
-            )
-            self.renamed_file.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(self.media_file.path, self.renamed_file)
-            return
+        try:
+            if self.comment_encoded in self.media_file.comment:
+                raise FileAlreadyEncodedException(
+                    f"Skipped because already encoded: {self.media_file.path}"
+                )
+            elif self.bit_rate <= self.bit_rate_threshold:
+                raise BitRateTooLowException(
+                    f"Skipped because bitrate below threshold ({VIDEO_BITRATE_LOW_THRESHOLD}): {self.media_file.path}"
+                )
+            elif self.media_file.vcodec in EXCEPT_FORMAT:
+                raise FormatExcludedException(
+                    f"Skipped because format is excluded ({self.media_file.vcodec}): {self.media_file.path}"
+                )
+            elif self.encode_stream_count == 0:
+                raise NoStreamsFoundException(
+                    f"No streams found in: {self.media_file.path}"
+                )
 
-        if log_word:
+        except (
+                FileAlreadyEncodedException, FileOversizedException, BitRateTooLowException,
+                FormatExcludedException) as e:
+            log_word = str(e)
             with self.skip_log.open("a", encoding="utf-8") as log_file:
                 log_file.write(log_word + "\n")
             self.encoded_dir.mkdir(parents=True, exist_ok=True)
             self.renamed_file = self.encoded_dir / self.media_file.filename
+            self.renamed_file.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(self.media_file.path, self.renamed_file)
+        except NoStreamsFoundException:
+            logger.error(f"No streams found in: {self.media_file.path}")
+            self.media_file.load_failed_dir.mkdir(parents=True, exist_ok=True)
+            self.renamed_file = (
+                    self.media_file.load_failed_dir / self.media_file.filename
+            )
             self.renamed_file.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(self.media_file.path, self.renamed_file)
 
@@ -160,6 +174,19 @@ class PreEncoder:
         This method should be overridden in subclasses to define specific codec options.
         """
         pass
+
+    def move_error_file(self, dir_name: str):
+        """
+        Move the file to an error directory for further analysis.
+
+        Args:
+            dir_name (str): Name of the directory to move the file.
+            media_file (MediaFile): The media file to move.
+        """
+        self.error_dir = Path(BASE_ERROR_DIR) / Path(dir_name) / self.media_file.relative_dir
+        self.renamed_file = self.error_dir / self.media_file.filename
+        self.error_dir.mkdir(parents=True, exist_ok=True)
+        shutil.move(self.media_file.path, self.renamed_file)
 
 
 class PreVideoEncoder(PreEncoder):
@@ -173,7 +200,7 @@ class PreVideoEncoder(PreEncoder):
     """
 
     def __init__(
-        self, media_file: Optional[MediaFile] = None, manual_mode: bool = False
+            self, media_file: Optional[MediaFile] = None, manual_mode: bool = False
     ):
         """
         Initialize the PreVideoEncoder with a media file and optional manual mode.
@@ -214,11 +241,10 @@ class PreVideoEncoder(PreEncoder):
             self.manual_mode = True
             try:
                 self.set_output_streams()
-            except NoAudioStreamError as nase:
+            except NoAudioStreamException as nase:
                 logger.error(nase)
                 self.move_error_file(
-                    VIDEO_NO_AUDIO_FOUND_ERROR_DIR.name, self.media_file
-                )
+                    VIDEO_NO_AUDIO_FOUND_ERROR_DIR.name)
             return
 
         if self.manual_mode:
@@ -247,7 +273,7 @@ class PreVideoEncoder(PreEncoder):
                     self.best_encoder = encoder
                     self.best_crf = crf
                     self.best_ratio = encoded_ratio
-            except CRFSearchFailedError:
+            except CRFSearchFailedException:
                 # Handle CRF search failure
                 if not self.best_encoder:
                     self.best_encoder = self.encoders[0]
@@ -256,8 +282,9 @@ class PreVideoEncoder(PreEncoder):
                     self.manual_mode = True
             except Exception as e:
                 # Log unexpected errors and move the file to an error directory
+                logger.error('unexpected error!')
                 logger.error(e)
-                self.move_error_file(str(type(e)), self.media_file)
+                self.move_error_file(str(type(e)))
 
         crf_check_end_time = datetime.now()
         self.crf_checking_time = crf_check_end_time - crf_check_start_time
@@ -285,7 +312,7 @@ class PreVideoEncoder(PreEncoder):
         )
 
         if self.renamed_file:  # Skip processing if the file was renamed
-            raise SkippedVideoFileError(f"no need to pre-encode: {self.renamed_file}")
+            raise SkippedVideoFileException(f"no need to pre-encode: {self.renamed_file}")
 
         # Construct command for CRF search
         cmd = (
@@ -296,7 +323,7 @@ class PreVideoEncoder(PreEncoder):
         res = run_cmd(cmd, self.media_file.path, self.error_dir)
 
         if res is None:
-            raise CRFSearchFailedError(
+            raise CRFSearchFailedException(
                 f"CRF check failed for file: {self.media_file.path}"
             )
 
@@ -314,34 +341,21 @@ class PreVideoEncoder(PreEncoder):
             )
 
             if crf == crf_not_matched or encoded_ratio == encoded_ratio_not_matched:
-                raise CRFSearchFailedError(
+                raise CRFSearchFailedException(
                     f"CRF check failed for file: {self.media_file.path}"
                 )
             return crf, encoded_ratio
 
         elif res.returncode == 1:
-            raise CRFSearchFailedError(
+            raise CRFSearchFailedException(
                 f"CRF check failed for file: {self.media_file.path}"
             )
         else:
-            raise UnexpectedPreEncoderError(
+            raise UnexpectedPreEncoderException(
                 f"Unexpected error: {self.media_file.path}, "
                 f"return code: {res.returncode}",
                 f"{res.stdout}, {res.stderr}",
             )
-
-    def move_error_file(self, dir_name: str, media_file: MediaFile):
-        """
-        Move the file to an error directory for further analysis.
-
-        Args:
-            dir_name (str): Name of the directory to move the file.
-            media_file (MediaFile): The media file to move.
-        """
-        self.error_dir = Path(BASE_ERROR_DIR) / dir_name / media_file.relative_dir
-        self.renamed_file = self.error_dir / media_file.filename
-        self.error_dir.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(media_file.path, self.renamed_file)
 
     def set_output_streams(self):
         """
@@ -363,8 +377,8 @@ class PreVideoEncoder(PreEncoder):
             video_stream
             for video_stream in self.media_file.video_streams
             if "avg_frame_rate" in video_stream
-            and "codec_name" in video_stream
-            and video_stream["codec_name"] not in SKIP_VIDEO_CODEC_NAMES
+               and "codec_name" in video_stream
+               and video_stream["codec_name"] not in SKIP_VIDEO_CODEC_NAMES
         ]
 
     def set_output_audio_streams(self):
@@ -378,7 +392,7 @@ class PreVideoEncoder(PreEncoder):
             self.output_audio_streams = self.media_file.audio_streams
             return
         elif len(self.media_file.audio_streams) == 0:
-            raise NoAudioStreamError(
+            raise NoAudioStreamException(
                 f"No suitable audio stream found for file: {self.media_file.path}"
             )
         for stream in self.media_file.audio_streams:
@@ -392,7 +406,7 @@ class PreVideoEncoder(PreEncoder):
                     self.output_audio_streams.append(stream)
 
         if not self.output_audio_streams:
-            raise NoAudioStreamError(
+            raise NoAudioStreamException(
                 f"No suitable audio stream found for file: {self.media_file.path}"
             )
 
@@ -441,7 +455,7 @@ class PreVideoEncoder(PreEncoder):
             stream
             for stream in self.media_file.subtitle_streams
             if "language" in stream
-            and any(
+               and any(
                 language_word in stream["language"].lower()
                 for language_word in LANGUAGE_WORDS
             )

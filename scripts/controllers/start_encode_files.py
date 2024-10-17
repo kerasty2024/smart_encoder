@@ -7,10 +7,10 @@ from pathlib import Path
 
 from loguru import logger
 
-from scripts.models.EncodeError import NoDurationFoundError
 from scripts.models.Encoder import VideoEncoder
 from scripts.models.Log import SuccessLog
 from scripts.models.MediaFile import MediaFile
+from scripts.models.PreVideoEncodeExceptions import NoDurationFoundException
 from scripts.models.ProcessFiles import ProcessVideoFiles
 from scripts.settings.video import VIDEO_OUT_DIR_ROOT, NO_DURATION_FOUND_ERROR_DIR
 
@@ -34,7 +34,7 @@ def start_encode_video_files_multi_process(path: Path, args: argparse.Namespace 
 
     try:
         with concurrent.futures.ProcessPoolExecutor(
-            max_workers=args.processes
+                max_workers=args.processes
         ) as executor:
             files_to_process = process_files.files
             if args.random:
@@ -79,7 +79,7 @@ def start_encode_video_file(file_path: Path, args: argparse.Namespace):
         video_encoder = VideoEncoder(media_file, args)
         logger.debug(f"Starting encoding for file: {file_path}")
         video_encoder.start()
-    except NoDurationFoundError:  # raised by media_file initialization
+    except NoDurationFoundException:  # raised by media_file initialization
         to_dir = NO_DURATION_FOUND_ERROR_DIR / file_path.relative_to(Path.cwd())
         to_dir.mkdir(parents=True, exist_ok=True)
         shutil.move(file_path, to_dir)

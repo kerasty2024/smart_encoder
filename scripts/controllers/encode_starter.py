@@ -17,8 +17,8 @@ class EncodeStarter:
     process_files: ProcessFiles
     encoded_dir: str
 
-    def __init__(self, path=os.getcwd(), args=None):
-        self.project_dir: str = os.path.abspath(path)
+    def __init__(self, path=Path(os.getcwd()), args=None):
+        self.project_dir: Path = path.absolute()
         self.args = args
 
     def process_single_file(self, path: str):
@@ -27,12 +27,12 @@ class EncodeStarter:
 
 class PhoneEncodeStarter(EncodeStarter):
 
-    def __init__(self, path=os.getcwd(), args=None):
+    def __init__(self, path=Path(os.getcwd()), args=None):
         super().__init__(path, args)
         self.encoded_dir = OUTPUT_DIR_IPHONE
         self.args = args
 
-    def process_single_file(self, path: str):
+    def process_single_file(self, path: Path):
         media_file = MediaFile(path)
         if self.args.audio_only:
             encoder = AudioEncoder(media_file, target_bit_rate=TARGET_BIT_RATE_IPHONE_XR, args=self.args)

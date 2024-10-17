@@ -6,7 +6,7 @@ from pathlib import Path
 import ffmpeg
 from loguru import logger
 
-from scripts.models.EncodeError import NoDurationFoundError
+from scripts.models.PreVideoEncodeExceptions import NoDurationFoundException
 from scripts.settings.common import LOAD_FAILED_LOG, LOAD_FAILED_DIR
 
 
@@ -69,7 +69,7 @@ class MediaFile:
         """
         self.path: Path = path
         self.filename: str = self.path.name
-        self.relative_dir: Path = self.path.relative_to(Path.cwd()).resolve()
+        self.relative_dir: Path = self.path.relative_to(Path.cwd()).parent
         self.size: int = self.path.stat().st_size
         self.probe = None
         self.duration: float = 0  # in seconds
@@ -152,7 +152,7 @@ class MediaFile:
         Raises an error if duration cannot be determined.
         """
         if not self.probe:
-            raise NoDurationFoundError(f"No probe data found for file {self.path}")
+            raise NoDurationFoundException(f"No probe data found for file {self.path}")
 
         # Attempt to find duration in format or streams
         duration_sources = [
@@ -171,7 +171,7 @@ class MediaFile:
         self.duration = self.calculate_duration_by_decoding()
 
         if self.duration <= 0:
-            raise NoDurationFoundError(f"Failed to get duration! {self.path}")
+            raise NoDurationFoundException(f"Failed to get duration! {self.path}")
 
     def calculate_duration_by_decoding(self):
         """Calculate video duration by decoding frames using ffmpeg."""

@@ -9,10 +9,11 @@ import yaml
 from loguru import logger
 
 from scripts.controllers.functions import format_timedelta, formatted_size, run_cmd
-from scripts.models.EncodeError import SkippedVideoFileError
 from scripts.models.Log import ErrorLog, SuccessLog
 from scripts.models.MediaFile import MediaFile
 from scripts.models.PreEncoder import PreVideoEncoder, PreEncoder
+from scripts.models.PreVideoEncodeExceptions import SkippedVideoFileException
+from scripts.models.VideoEncodeExceptions import MP4MKVEncodeFailException
 from scripts.settings.audio import (
     DEFAULT_AUDIO_ENCODER,
     TARGET_BIT_RATE_IPHONE_XR,
@@ -110,10 +111,11 @@ class Encoder:
             f"Starting: {self.original_media_file.path.relative_to(Path.cwd())}"
         )
         self.encoded_dir.mkdir(parents=True, exist_ok=True)
-        if self.pre_encoder:
+        logger.debug(vars(self))
+        if 'pre_encoder' in vars(self):
             try:
                 self.pre_encoder.start()
-            except SkippedVideoFileError:  # no need to encode
+            except SkippedVideoFileException:  # no need to encode
                 return
         _encode()
         self.post_actions()
@@ -262,7 +264,10 @@ class VideoEncoder(Encoder):
         """
         self.encoder = self.pre_encoder.best_encoder
         self.crf = self.pre_encoder.best_crf
-        self.ffmpeg_encode()
+        try:
+            self.ffmpeg_encode()
+        except MP4MKVEncodeFailException:
+            self.pre_encoder.move_error_file('MP4_or_MKV_Encode_Failed')
 
     def over_sized_actions(self):
         """
@@ -270,7 +275,7 @@ class VideoEncoder(Encoder):
         Deletes the oversized file, increases CRF, and retries encoding.
         """
         if self.encoded_size > self.original_media_file.size:
-            self.encoded_file.unlink()
+            self.encoded_file.unlink(missing_ok=True)
             logger.debug(
                 f"File is oversized: {self.original_media_file.path}, "
                 f"ratio: {self.encoded_size / self.original_media_file.size}, "
@@ -360,6 +365,7 @@ class VideoEncoder(Encoder):
                 f"MP4 encoding failed for {self.original_media_file.path}. "
                 f"Return code: ({res.returncode}):{os.linesep}{res}"
             )
+            self.encoded_file.unlink(missing_ok=True)
             self.encoded_file = self.encoded_file.with_suffix(".mkv")
             self.set_encode_cmd()
             res = run_cmd(
@@ -371,6 +377,9 @@ class VideoEncoder(Encoder):
             )
             if res.returncode == 0:
                 success_action()
+            else:
+                self.encoded_file.unlink(missing_ok=True)
+                raise MP4MKVEncodeFailException(f"MP4 encoding failed for {self.original_media_file.path}. ")
 
     def set_video_map_cmd(self):
         """
@@ -636,22 +645,14 @@ class AudioEncoder(Encoder):
         super().__init__(media_file=media_file, args=args)
         self.encoder = DEFAULT_AUDIO_ENCODER
         self.target_bit_rate = target_bit_rate
-        self.encoded_dir = Path.joinpath(
-            AUDIO_ENCODED_ROOT_DIR,
-            self.original_media_file.path.parent.relative_to(Path.cwd()),
-        )
+        self.encoded_dir = AUDIO_ENCODED_ROOT_DIR / self.original_media_file.path.parent.relative_to(Path.cwd())
         self.encoded_file = (
                 self.encoded_dir
                 / self.original_media_file.path.with_suffix(self._get_file_extension()).name
         )
 
-        self.encoded_raw_dir = os.path.join(
-            AUDIO_ENCODED_RAW_DIR,
-            os.path.relpath(
-                os.path.dirname(self.original_media_file.path), os.getcwd()
-            ),
-        )
-        self.encoded_root_dir = os.path.abspath(VIDEO_OUT_DIR_ROOT)
+        self.encoded_raw_dir = AUDIO_ENCODED_RAW_DIR / self.original_media_file.path.parent.relative_to(Path.cwd())
+        self.encoded_root_dir = VIDEO_OUT_DIR_ROOT.absolute()
         self.error_dir = BASE_ERROR_DIR
         self.success_log_dir = self.encoded_dir
 
@@ -662,9 +663,9 @@ class AudioEncoder(Encoder):
         :return: File extension for the encoded audio file.
         """
         if self.encoder == "libopus":
-            return "opus"
+            return ".opus"
         elif self.encoder == "libmp3lame":
-            return "mp3"
+            return ".mp3"
         else:
             logger.error("Unknown encoder detected!")
             return "unknown"

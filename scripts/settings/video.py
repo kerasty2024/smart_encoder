@@ -6,7 +6,7 @@ from scripts.settings.common import SKIPPED_DIR, BASE_ERROR_DIR
 DEFAULT_MAX_WORKERS = 4  # Maximum number of workers for processing
 
 # Video Settings
-VIDEO_BITRATE_LOW_THRESHOLD = 600_000  # Low bitrate threshold for video processing
+VIDEO_BITRATE_LOW_THRESHOLD = 100_000  # Low bitrate threshold for video processing
 VIDEO_EXTENSIONS = (
     ".wmv",
     ".ts",
@@ -66,6 +66,7 @@ EXCEPT_FOLDERS_KEYWORDS = (
 MANUAL_ENCODE_RATE = 0.9  # Manual encoding rate
 MANUAL_CRF = 23  # Manual CRF value
 MANUAL_CRF_INCREMENT_PERCENT = 15  # Percentage increment for CRF
+MAX_CRF = 55  # max limit CRF of ffmpeg command.
 
 # Audio and Subtitle Settings
 AUDIO_OPUS_CODECS = (
