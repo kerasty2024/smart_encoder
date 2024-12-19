@@ -1,4 +1,7 @@
-set root_cmd_path="C:\Tools\Python\encode\abav1_AutoEncode_AV1_root.cmd"
-call %root_cmd_path%
+set conda_cmd_path="C:\Tools\cmds\lunch_conda.cmd"
+call %conda_cmd_path%
+call activate Encode
+git pull
+pip install -r requirements.txt
 python -O "C:\Tools\Python\encode\main.py" --processes 1 --move-raw-file --keep-mtime
 pause

@@ -235,6 +235,15 @@ class PreVideoEncoder(PreEncoder):
         Start the pre-encoding process by determining the best CRF and encoder.
         """
         super().start()
+        try:
+            self.set_output_streams()
+        except NoAudioStreamException as nase:
+            logger.error(nase)
+            self.move_error_file(
+                VIDEO_NO_AUDIO_FOUND_ERROR_DIR.name)
+            return
+
+        # start defining best crf and encoder
         if self.encode_info.load():
             # Load encoding information if available
             self.best_crf = self.encode_info.crf
@@ -247,17 +256,9 @@ class PreVideoEncoder(PreEncoder):
             # Use manual mode settings if enabled
             self.best_crf = MANUAL_CRF
             self.best_encoder = self.encoders[0]
-            self.set_output_streams()
             self.crf_checking_time = timedelta(microseconds=0)
             return
-
-        try:
-            self.set_output_streams()
-        except NoAudioStreamException as nase:
-            logger.error(nase)
-            self.move_error_file(
-                VIDEO_NO_AUDIO_FOUND_ERROR_DIR.name)
-            return
+ 
 
         self.set_suitable_codec_options()
 
