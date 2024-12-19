@@ -241,13 +241,7 @@ class PreVideoEncoder(PreEncoder):
             self.best_encoder = self.encode_info.encoder
             self.manual_mode = True
             return
-        try:
-            self.set_output_streams()
-        except NoAudioStreamException as nase:
-            logger.error(nase)
-            self.move_error_file(
-                VIDEO_NO_AUDIO_FOUND_ERROR_DIR.name)
-            return
+
 
         if self.manual_mode:
             # Use manual mode settings if enabled
@@ -255,6 +249,14 @@ class PreVideoEncoder(PreEncoder):
             self.best_encoder = self.encoders[0]
             self.set_output_streams()
             self.crf_checking_time = timedelta(microseconds=0)
+            return
+
+        try:
+            self.set_output_streams()
+        except NoAudioStreamException as nase:
+            logger.error(nase)
+            self.move_error_file(
+                VIDEO_NO_AUDIO_FOUND_ERROR_DIR.name)
             return
 
         self.set_suitable_codec_options()
