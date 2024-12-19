@@ -6,6 +6,7 @@ from pathlib import Path
 
 from loguru import logger
 
+from scripts.controllers.Appends import Modules
 from scripts.controllers.start_encode_files import (
     start_encode_video_files_multi_process,
 )
@@ -58,7 +59,6 @@ def main():
     Main function to start the encoding process.
     """
     args = get_args()
-
     # Debug mode setup
     if __debug__:
         target = Path(r"Z:\encode\Reduce size\Test\target").resolve()
@@ -77,6 +77,6 @@ def main():
 
 
 if __name__ == "__main__":
-    # Modules.update()
+    Modules.update()
     os.environ["KMP_DUPLICATE_LIB_OK"] = "True"
     main()

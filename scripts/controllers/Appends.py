@@ -31,6 +31,8 @@ class Modules:
         """
         module_update_path = Path(MODULE_UPDATE_PATH)
         module_path = Path(MODULE_PATH)
+        if not module_update_path.exists() or not module_path.exists():
+            return
 
         for update_file in module_update_path.glob("*"):
             try:
