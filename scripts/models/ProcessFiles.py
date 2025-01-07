@@ -21,7 +21,7 @@ class ProcessFiles:
     def __init__(self, path: Path = None, args=None):
         self.source_dir = self._get_source_directory(path)
         if self.source_dir is None:
-            logger.error(f"No file/directory found: {path}")
+            logger.warning(f"No file/directory found: {path}")
             return
 
         self.args = args

@@ -10,7 +10,7 @@ from loguru import logger
 from scripts.controllers.functions import (
     run_cmd,
     format_timedelta,
-    detect_audio_language_multi_segments,
+    detect_audio_language_multi_segments, find_key_in_dictionary,
 )
 from scripts.models.MediaFile import MediaFile
 from scripts.models.PreVideoEncodeExceptions import (
@@ -458,12 +458,13 @@ class PreVideoEncoder(PreEncoder):
         if len(self.media_file.subtitle_streams) <= 1:
             self.output_subtitle_streams = self.media_file.subtitle_streams
             return
+
         self.output_subtitle_streams = [
             stream
             for stream in self.media_file.subtitle_streams
-            if "language" in stream
+            if (language := find_key_in_dictionary(stream))
                and any(
-                language_word in stream["language"].lower()
+                language_word.lower() in language.lower()
                 for language_word in LANGUAGE_WORDS
             )
         ]

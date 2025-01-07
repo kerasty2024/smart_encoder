@@ -224,3 +224,29 @@ def get_args():
         "--keep-mtime", action="store_true", help="Encode using AV1 codec only."
     )
     return parser.parse_args()
+
+
+def find_key_in_dictionary(d, key="language"):
+    """
+    Recursively search for a key in a nested dictionary.
+
+    Args:
+        d (dict): The dictionary to search.
+        key (str): The key to find.
+
+    Returns:
+        str or None: The value of the found key, or None if not found.
+    """
+    if not isinstance(d, dict):
+        return None
+
+    if key in d:
+        return d[key]
+
+    for sub_key, sub_value in d.items():
+        if isinstance(sub_value, dict):
+            result = find_key_in_dictionary(sub_value, key)
+            if result is not None:
+                return result
+
+    return None
