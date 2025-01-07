@@ -106,7 +106,7 @@ def pre_and_post_actions(process_files: ProcessVideoFiles, path: Path):
         process_files.move_raw_folder_if_no_process_files(
             Path(VIDEO_OUT_DIR_ROOT).resolve()
         )
-        process_files.remove_small_files()
+        # process_files.remove_small_files()
         SuccessLog.generate_combined_log_yaml(path)
         logger.info("pre & post processing actions completed.")
     except Exception as e:
