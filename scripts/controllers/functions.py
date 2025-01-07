@@ -1,3 +1,4 @@
+import argparse
 import collections
 import subprocess
 import tempfile
@@ -187,3 +188,39 @@ def detect_audio_language_single(
     except Exception as e:
         logger.error(f"Failed to detect language for file {in_file}: {e}")
         return LANGUAGE_WORDS[0]
+
+def get_args():
+    """
+    Parses command-line arguments.
+
+    Returns:
+        argparse.Namespace: Parsed arguments.
+    """
+    parser = argparse.ArgumentParser(description="Smart Encoder for video files.")
+    parser.add_argument(
+        "--processes", type=int, default=4, help="Number of processes to use."
+    )
+    parser.add_argument(
+        "--random", action="store_true", help="encode files in random order."
+    )
+    parser.add_argument(
+        "--not-rename", action="store_true", help="Do not rename files after encoding."
+    )
+    parser.add_argument(
+        "--audio-only", action="store_true", help="Process only audio files."
+    )
+    parser.add_argument(
+        "--move-raw-file", action="store_true", help="Move raw files after processing."
+    )
+    parser.add_argument(
+        "--manual-mode",
+        action="store_true",
+        help="Run in manual mode with fixed paths.",
+    )
+    parser.add_argument(
+        "--av1-only", action="store_true", help="Encode using AV1 codec only."
+    )
+    parser.add_argument(
+        "--keep-mtime", action="store_true", help="Encode using AV1 codec only."
+    )
+    return parser.parse_args()

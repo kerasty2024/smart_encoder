@@ -26,10 +26,9 @@ class ProcessFiles:
 
         self.args = args
         self.set_dirs()
-        self.standardize_dir_names()
-        self.set_files()
         if not getattr(self.args, "not_rename", False):
             self.standardize_file_names()
+        self.set_files()
 
     @staticmethod
     def _get_source_directory(path: Path) -> Path:
