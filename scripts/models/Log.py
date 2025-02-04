@@ -126,7 +126,8 @@ class SuccessLog(Log):
             with self.file.open("r", encoding="utf-8") as f:
                 try:
                     self.contents = yaml.full_load(f) or []
-                except yaml.constructor.ConstructorError:
+                except yaml.constructor.ConstructorError as CE:
+                    logger.error(CE)
                     os.remove(f)
 
         index = len(self.contents) + 1
@@ -187,8 +188,15 @@ class SuccessLog(Log):
                             width=220,
                         )
 
-        combined_log_file = Path(pardir) / COMPLETED_LOG_FILE_NAME
         contents = []
+        combined_log_file = Path(pardir) / COMPLETED_LOG_FILE_NAME
+        if combined_log_file.is_file():
+            with combined_log_file.open("r", encoding="utf-8") as f:
+                try:
+                    contents = yaml.full_load(f) or []
+                except yaml.constructor.ConstructorError as CE:
+                    logger.error(CE)
+                    os.remove(f)
         log_dirs = set()
 
         # Collect all logs and directories
