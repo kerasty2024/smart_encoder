@@ -50,7 +50,8 @@ class Encoder:
         pre_encoder: Instance of PreEncoder for pre-encoding tasks.
         encode_start_datetime: Start time of the encoding process.
         encode_end_datetime: End time of the encoding process.
-        total_time: Total duration of encoding.
+        encode_time: Total duration of encoding.
+        total_time: total duration of encoding (including pre-encode)
         encoder: Name of the encoder used.
         crf: Constant Rate Factor for encoding.
         encoded_dir: Directory where encoded files are stored.
@@ -64,6 +65,7 @@ class Encoder:
     pre_encoder: PreEncoder
     encode_start_datetime: datetime
     encode_end_datetime: datetime
+    encode_time: timedelta
     total_time: timedelta
     encoder: str
     crf: int
@@ -105,7 +107,10 @@ class Encoder:
             )
             self.encode()
             self.encode_end_datetime = datetime.now()
-            self.total_time = self.encode_end_datetime - self.encode_start_datetime
+            self.encode_time = self.encode_end_datetime - self.encode_start_datetime
+            self.total_time = (getattr(self.pre_encoder, "crf_checking_time", 0) # self.pre_encoder.crf_checking_time が存在する場合に total_time を計算
+              if hasattr(self, "pre_encoder") else 0) + self.encode_time
+
             self.write_success_log()
 
         logger.info(
@@ -152,7 +157,7 @@ class Encoder:
             ),
             "elapsed time": format_timedelta(self.total_time),
             "encode time efficiency (elapsed_min/Video_min)": round(
-                self.total_time.total_seconds() / self.original_media_file.duration, 2
+                self.encode_time.total_seconds() / self.original_media_file.duration, 2
             ),
             "encoded ratio": round(
                 self.encoded_size / self.original_media_file.size, 2
@@ -206,7 +211,7 @@ class Encoder:
 
         logger.success(
             f"Completed: {self.original_media_file.path.relative_to(Path.cwd())}, "
-            f"total time: {format_timedelta(self.total_time)}, "
+            f"total time: {format_timedelta(self.encode_time)}, "
             f"{formatted_size(self.original_media_file.size)} -> {formatted_size(self.encoded_file.stat().st_size)} "
             f"({int((self.encoded_file.stat().st_size / self.original_media_file.size) * 100)}%)"
         )
@@ -519,7 +524,7 @@ class VideoEncoder(Encoder):
                 if self.pre_encoder.crf_checking_time
                 else None,
                 "encode": format_timedelta(
-                    self.encode_end_datetime - self.encode_start_datetime
+                    self.encode_time
                 ),
                 "target VMAF": TARGET_VMAF,
             },
@@ -565,7 +570,7 @@ class PhoneVideoEncoder(Encoder):
         Performs post-encoding actions specific to iPhone videos, such as logging success.
         """
         logger.success(
-            f"{os.path.relpath(self.original_media_file.path)} ({format_timedelta(self.total_time)})"
+            f"{os.path.relpath(self.original_media_file.path)} ({format_timedelta(self.encode_time)})"
         )
 
     def set_encoded_comment(self):

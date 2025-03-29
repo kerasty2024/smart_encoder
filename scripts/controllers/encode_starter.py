@@ -11,6 +11,7 @@ from scripts.models.ProcessFiles import ProcessFiles, ProcessPhoneFiles, Process
 from scripts.settings.audio import TARGET_BIT_RATE_IPHONE_XR, AUDIO_ENCODED_ROOT_DIR
 from scripts.settings.video import OUTPUT_DIR_IPHONE
 
+# for iPhone use
 
 class EncodeStarter:
     encoder: Encoder
