@@ -225,12 +225,8 @@ class ProcessVideoFiles(ProcessFiles):
                 continue
 
             target = dst / directory.relative_to(self.source_dir)
-            if target.parent.parent.name == target.parent.name:
-                logger.error(f'target Path: {target}, dst: {dst}')
             target.parent.mkdir(parents=True, exist_ok=True)
             try:
-                shutil.move(str(directory), str(target))
-            except OSError:
                 shutil.copytree(directory, target, dirs_exist_ok=True)
                 shutil.rmtree(directory)
             except Exception as e:
@@ -274,3 +270,4 @@ class ProcessAudioFiles(ProcessFiles):
                 for f in d.glob(f"*{ext}")
             )
         )
+

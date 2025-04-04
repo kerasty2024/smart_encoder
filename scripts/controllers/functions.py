@@ -223,7 +223,9 @@ def get_args():
     parser.add_argument(
         "--keep-mtime", action="store_true", help="Encode using AV1 codec only."
     )
-    return parser.parse_args()
+    # 未知の引数を無視する
+    args, _ = parser.parse_known_args()
+    return args
 
 
 def find_key_in_dictionary(d, key="language"):
