@@ -110,7 +110,7 @@ class ProcessFiles:
                 if not any(empty_candidate_dir.iterdir()):
                     try:
                         empty_candidate_dir.rmdir()
-                        logger.info(f"Removed empty directory: {empty_candidate_dir}")
+                        logger.debug(f"Removed empty directory: {empty_candidate_dir}")
                         deleted_in_pass = True
                     except OSError as e:
                         if e.errno == 2:
@@ -192,7 +192,7 @@ class ProcessFiles:
                     )
                     continue
 
-                logger.info(
+                logger.debug(
                     f"Directory {sub_dir_to_check.name} has no processable files. Preparing to move to {final_target_path}."
                 )
 
@@ -215,7 +215,7 @@ class ProcessFiles:
                     # Now, final_target_path either does not exist, or was a dir and got removed.
                     # We can use rename which is atomic on the same filesystem.
                     sub_dir_to_check.rename(final_target_path)
-                    logger.info(f"Moved {sub_dir_to_check.name} to {final_target_path}")
+                    logger.debug(f"Moved {sub_dir_to_check.name} to {final_target_path}")
 
                 except Exception as e:
                     logger.error(

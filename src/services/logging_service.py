@@ -278,7 +278,7 @@ class SuccessLog(Log):
                                 indent=4,
                                 width=220,
                             )
-                        logger.info(
+                        logger.debug(
                             f"Combined random logs into dated log: {combined_date_log_path}"
                         )
                     except Exception as e:

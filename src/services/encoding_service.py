@@ -382,7 +382,7 @@ class Encoder:
             log_storage_path, use_dated_filename=log_date_in_filename
         )
         self.success_log.write(log_dict)
-        logger.info(
+        logger.debug(
             f"Success log written for {self.original_media_file.filename} to {self.success_log.log_file_path}"
         )
 
@@ -412,7 +412,7 @@ class Encoder:
                 shutil.move(
                     str(self.original_media_file.path), str(raw_file_target_path)
                 )
-                logger.info(
+                logger.debug(
                     f"Moved original file {self.original_media_file.filename} to raw archive: {raw_file_target_path}"
                 )
             except shutil.Error as e:
@@ -667,7 +667,7 @@ class VideoEncoder(Encoder):
                     self.move_to_oversized_error_dir()
                 return False
         else:
-            logger.info(
+            logger.debug(
                 f"File {self.encoded_file.name} is not oversized. Size: {formatted_size(current_encoded_size)}."
             )
             if self.pre_encoder.encode_info_handler.path.exists():
@@ -930,7 +930,7 @@ class VideoEncoder(Encoder):
                 self.encoded_file.suffix.lower() != ".mkv"
                 and input_subtitle_codec not in ["mov_text", "tx3g"]
             ):
-                logger.warning(
+                logger.debug(
                     f"Subtitle stream {stream_index} (codec {input_subtitle_codec}) might not be ideal for MP4. Trying mov_text conversion."
                 )
 

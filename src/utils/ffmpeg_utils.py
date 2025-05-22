@@ -38,7 +38,7 @@ def run_cmd(
         if result.stdout and len(result.stdout) > 100:
             logger.trace(f"Command stdout (truncated): {result.stdout[:500]}")
         if result.stderr and result.returncode != 0:
-            logger.warning(f"Command stderr: {result.stderr}")
+            logger.debug(f"Command stderr: {result.stderr}")
         elif result.stderr:
             logger.trace(f"Command stderr (non-error): {result.stderr}")
         return result

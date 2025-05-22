@@ -307,7 +307,7 @@ class PreVideoEncoder(PreEncoder):
                     self.best_ratio = encoded_ratio_float
 
             except CRFSearchFailedException as e:
-                logger.warning(
+                logger.debug(
                     f"CRF search failed for encoder {encoder_candidate} on {self.media_file.filename}: {e}. Trying next encoder if available."
                 )
                 continue
@@ -321,7 +321,7 @@ class PreVideoEncoder(PreEncoder):
         self.crf_checking_time = datetime.now() - crf_search_start_time
 
         if not self.best_encoder or self.best_crf == 0:
-            logger.error(
+            logger.warning(
                 f"CRF search failed for all configured encoders for {self.media_file.filename}. Using fallback manual settings (CRF: {MANUAL_CRF})."
             )
             self.best_crf = MANUAL_CRF
@@ -341,7 +341,7 @@ class PreVideoEncoder(PreEncoder):
             ratio_log_str = (
                 f"{self.best_ratio:.2f}" if self.best_ratio is not None else "N/A"
             )
-            logger.info(
+            logger.debug(
                 f"Determined best params for {self.media_file.filename}: Encoder {self.best_encoder}, CRF {self.best_crf}, Ratio {ratio_log_str}. Time: {format_timedelta(self.crf_checking_time)}"
             )
             self.encode_info_handler.dump(
@@ -425,7 +425,7 @@ class PreVideoEncoder(PreEncoder):
             err_msg = f"ab-av1 crf-search command failed. Return code: {res.returncode if res else 'N/A'}."
             if res and res.stderr:
                 err_msg += f" Stderr: {res.stderr}"
-            logger.error(err_msg)
+            logger.debug(err_msg)
             raise CRFSearchFailedException(err_msg)
 
         stdout_lower = res.stdout.lower()

@@ -275,10 +275,6 @@ class StandardVideoPipeline(BaseEncodeStarter):
             )
             return
 
-        logger.info(
-            f"StandardPipeline: Remaining files to process: {len(self.process_files_handler.files)}"
-        )
-
         try:
             self.process_multi_file()  # This contains the ProcessPoolExecutor logic
         except KeyboardInterrupt:
