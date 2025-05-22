@@ -1,4 +1,5 @@
 import argparse
+from pathlib import Path # 追加
 
 def get_args() -> argparse.Namespace:
     """
@@ -39,8 +40,12 @@ def get_args() -> argparse.Namespace:
         help="Set the logging level."
     )
     parser.add_argument(
-        "--allow-no-audio", action="store_true", # New argument
+        "--allow-no-audio", action="store_true",
         help="Allow encoding video files even if no suitable audio stream is found (encodes video without audio)."
+    )
+    parser.add_argument(
+        "--temp-work-dir", type=str, default=None, # New argument
+        help="Specify a directory for temporary files. Useful for pointing to a RAM disk to reduce HDD/SSD writes."
     )
     # Hypothetical arguments to manage different pipelines or debug modes from __main__.py
     parser.add_argument(
@@ -57,4 +62,17 @@ def get_args() -> argparse.Namespace:
     )
 
     args = parser.parse_args()
+
+    # Validate temp_work_dir if provided
+    if args.temp_work_dir:
+        temp_dir_path = Path(args.temp_work_dir)
+        if not temp_dir_path.is_dir():
+            # Try to create it if it doesn't exist
+            try:
+                temp_dir_path.mkdir(parents=True, exist_ok=True)
+                print(f"INFO: Created temporary working directory: {temp_dir_path}")
+            except Exception as e:
+                parser.error(f"The specified temporary working directory '{args.temp_work_dir}' is not a valid directory and could not be created: {e}")
+        args.temp_work_dir = temp_dir_path.resolve() # Store as resolved Path object
+
     return args

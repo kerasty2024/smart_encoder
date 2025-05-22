@@ -3,7 +3,7 @@ import shutil
 from datetime import datetime, timedelta
 from pathlib import Path
 from pprint import pformat
-from typing import Optional, List, Dict, Tuple, Type
+from typing import Optional, List, Dict, Tuple, Type, Any
 
 from loguru import logger
 
@@ -56,7 +56,7 @@ class PreEncoder:
     renamed_file_on_skip_or_error: Optional[Path] = None
     bit_rate_low_threshold: int
     is_manual_mode: bool
-    args: object  # To access command line arguments like --allow-no-audio
+    args: Any
     encode_info_handler: EncodeInfo
     best_encoder: str = ""
     best_crf: int = 0
@@ -70,7 +70,7 @@ class PreEncoder:
         self,
         media_file: MediaFile,
         manual_mode_flag: bool = False,
-        args=None,  # Added args
+        args: Optional[Any] = None,
         comment_tag_encoded: str = "",
         relevant_bitrate_for_check: int = 0,
         relevant_stream_count_for_check: int = 0,
@@ -79,7 +79,7 @@ class PreEncoder:
     ):
         self.media_file = media_file
         self.is_manual_mode = manual_mode_flag
-        self.args = args  # Store args
+        self.args = args
         self.start_time = datetime.now()
 
         self.comment_tag_for_encoded_check = comment_tag_encoded
@@ -223,12 +223,15 @@ class PreEncoder:
 
 class PreVideoEncoder(PreEncoder):
     def __init__(
-        self, media_file: MediaFile, manual_mode_flag: bool = False, args=None
-    ):  # Added args
+        self,
+        media_file: MediaFile,
+        manual_mode_flag: bool = False,
+        args: Optional[Any] = None,
+    ):
         super().__init__(
             media_file=media_file,
             manual_mode_flag=manual_mode_flag,
-            args=args,  # Pass args to parent
+            args=args,
             comment_tag_encoded=VIDEO_COMMENT_ENCODED,
             relevant_bitrate_for_check=media_file.vbitrate,
             relevant_stream_count_for_check=media_file.video_stream_count,
@@ -242,21 +245,19 @@ class PreVideoEncoder(PreEncoder):
         try:
             self._select_output_audio_streams()
         except NoAudioStreamException as e:
-            # Check the command line argument --allow-no-audio
             if self.args and getattr(self.args, "allow_no_audio", False):
                 logger.warning(
                     f"No suitable audio stream for {self.media_file.filename}: {e}. Encoding will proceed without audio as per --allow-no-audio."
                 )
                 self.output_audio_streams = []
             else:
-                # Default behavior: treat as error, move file, and re-raise
                 logger.error(
                     f"No suitable audio stream for {self.media_file.filename}: {e}. File will be moved to error directory."
                 )
                 self.move_file_to_error_dir(
                     error_subdir_name=VIDEO_NO_AUDIO_FOUND_ERROR_DIR.name
                 )
-                raise  # Re-raise to be caught by PreEncoder.start or Encoder.start
+                raise
         self._select_output_subtitle_streams()
 
         if self.encode_info_handler.load():
@@ -362,11 +363,48 @@ class PreVideoEncoder(PreEncoder):
                 f"File {self.media_file.filename} no longer at original path for CRF search."
             )
 
+        temp_dir_for_ab_av1: Optional[str] = None
+        if (
+            self.args
+            and hasattr(self.args, "temp_work_dir")
+            and self.args.temp_work_dir
+        ):
+            temp_dir_for_ab_av1 = str(self.args.temp_work_dir)
+            logger.debug(
+                f"Using specified temporary directory for ab-av1: {temp_dir_for_ab_av1}"
+            )
+
+        cmd_parts = [
+            "ab-av1",
+            "crf-search",
+            "-e",
+            encoder_to_test,
+            "-i",
+            str(self.media_file.path),  # Ensure path is string
+            "--sample-every",
+            SAMPLE_EVERY,
+            "--max-encoded-percent",
+            str(MAX_ENCODED_PERCENT),  # Ensure numeric args are strings
+            "--min-vmaf",
+            str(TARGET_VMAF),  # Ensure numeric args are strings
+        ]
+        if temp_dir_for_ab_av1:
+            cmd_parts.extend(["--temp-dir", temp_dir_for_ab_av1])
+
+        cmd_str = " ".join(
+            f'"{part}"' if " " in part else part for part in cmd_parts
+        )  # Basic quoting for parts with spaces
+        # More robust quoting might be needed if paths/args have special shell characters.
+        # For `shell=True` in `run_cmd`, often simpler to just build the full string carefully.
+        # Rebuilding cmd_str more carefully for shell=True:
         cmd_str = (
-            f'ab-av1 crf-search -e {encoder_to_test} -i "{self.media_file.path}" '
-            f"--sample-every {SAMPLE_EVERY} --max-encoded-percent {MAX_ENCODED_PERCENT} "
-            f"--min-vmaf {TARGET_VMAF}"
+            f'ab-av1 crf-search -e "{encoder_to_test}" -i "{self.media_file.path}" '
+            f'--sample-every "{SAMPLE_EVERY}" --max-encoded-percent "{MAX_ENCODED_PERCENT}" '
+            f'--min-vmaf "{TARGET_VMAF}"'
         )
+        if temp_dir_for_ab_av1:
+            cmd_str += f' --temp-dir "{temp_dir_for_ab_av1}"'
+
         logger.debug(
             f"Executing CRF search for {self.media_file.filename} with {encoder_to_test}: {cmd_str}"
         )
@@ -469,7 +507,7 @@ class PreVideoEncoder(PreEncoder):
             )
         self.output_video_streams = suitable_video_streams
 
-    def _select_output_audio_streams(self):  # Now this can raise NoAudioStreamException
+    def _select_output_audio_streams(self):
         if not self.media_file.audio_streams:
             raise NoAudioStreamException(
                 f"No audio streams at all in {self.media_file.filename}."
@@ -532,10 +570,14 @@ class PreVideoEncoder(PreEncoder):
                 file_duration = (
                     self.media_file.duration if self.media_file.duration > 0 else 0
                 )
+                temp_dir_for_detection = (
+                    getattr(self.args, "temp_work_dir", None) if self.args else None
+                )
                 detected_lang = detect_audio_language_multi_segments(
                     self.media_file.path,
                     stream_data,
                     total_media_duration_seconds=int(file_duration),
+                    temp_work_dir_override=temp_dir_for_detection,
                 ).lower()
                 logger.info(
                     f"Detected language for audio stream index {stream_data.get('index')} of {self.media_file.filename}: {detected_lang}"
