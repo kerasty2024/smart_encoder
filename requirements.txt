@@ -1,4 +1,5 @@
-faster_whisper
-ffmpeg-python
-loguru
-PyYAML
+faster_whisper==1.1.1
+ffmpeg==1.4
+loguru==0.7.3
+PyYAML==6.0.2
+toml==0.10.2

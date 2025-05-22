@@ -1,6 +1,7 @@
 from pathlib import Path
 
-from scripts.settings.common import SKIPPED_DIR, BASE_ERROR_DIR
+# Note: Assuming common.py is in the same directory (src.config.common)
+from .common import SKIPPED_DIR, BASE_ERROR_DIR # Changed from src.settings.common
 
 # General Settings
 DEFAULT_MAX_WORKERS = 4  # Maximum number of workers for processing

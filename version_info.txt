@@ -1,0 +1,24 @@
+VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers=(1, 1, 0, 0),
+    prodvers=(1, 1, 0, 0),
+    mask=0x3f,
+    flags=0x0,
+    fileType=0x1,
+    subtype=0x0,
+    date=(0, 0)
+    ),
+  kids=[
+    StringFileInfo(
+      [
+        StringStruct('FileVersion', '1.1.0'),
+        StringStruct('ProductVersion', '1.1.0'),
+        StringStruct('ProductName', 'smart encoder'),
+        StringStruct('Author', 'Kerasty'),
+        StringStruct('Github', 'https://github.com/kerasty2024/'),
+      ]
+    ),
+    VarFileInfo([VarStruct('Translation', [0x0409, 1252])]) # 例: 英語(米国), Windows Latin 1
+                                                         # 日本語の場合は [0x0411, 932] (Shift_JIS) や [0x0411, 1200] (Unicode) など
+  ]
+)
