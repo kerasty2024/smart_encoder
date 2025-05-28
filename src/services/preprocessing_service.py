@@ -12,8 +12,7 @@ from ..utils.ffmpeg_utils import (
     run_cmd,
     detect_audio_language_multi_segments,
 )
-from ..utils.format_utils import format_timedelta, find_key_in_dictionary
-
+from ..utils.format_utils import format_timedelta
 
 # Domain
 from ..domain.media import MediaFile
@@ -21,7 +20,6 @@ from ..domain.exceptions import (
     PreprocessingException,
     CRFSearchFailedException,
     SkippedFileException,
-    UnexpectedPreprocessingException,
     NoAudioStreamException,
     FileAlreadyEncodedException,
     BitRateTooLowException,
@@ -31,7 +29,12 @@ from ..domain.exceptions import (
 from ..domain.temp_models import EncodeInfo
 
 # Config
-from ..config.common import BASE_ERROR_DIR, LANGUAGE_WORDS
+from ..config.common import (
+    BASE_ERROR_DIR, LANGUAGE_WORDS, MAX_ENCODE_RETRIES,
+    JOB_STATUS_PENDING, JOB_STATUS_PREPROCESSING_STARTED, JOB_STATUS_CRF_SEARCH_STARTED,
+    JOB_STATUS_PREPROCESSING_DONE,
+    JOB_STATUS_ERROR_RETRYABLE, JOB_STATUS_ERROR_PERMANENT, JOB_STATUS_SKIPPED
+)
 from ..config.video import (
     VIDEO_OUT_DIR_ROOT,
     VIDEO_COMMENT_ENCODED,
@@ -99,32 +102,119 @@ class PreEncoder:
             self.media_file.md5, storage_dir=encode_info_storage_dir
         )
 
-        self.output_video_streams = []
-        self.output_audio_streams = []
-        self.output_subtitle_streams = []
+        if not self.encode_info_handler.load():
+            self.encode_info_handler.dump(status=JOB_STATUS_PENDING,
+                                          ori_video_path=str(self.media_file.path),
+                                          pre_encoder_data={"is_manual_mode": self.is_manual_mode}) # Store initial manual mode
+        else:
+            # Restore state from EncodeInfo
+            if self.encode_info_handler.pre_encoder_data:
+                loaded_manual_mode = self.encode_info_handler.pre_encoder_data.get("is_manual_mode")
+                if loaded_manual_mode is not None:
+                    self.is_manual_mode = loaded_manual_mode
+
+                # If resuming a state where pre-processing steps were partially complete,
+                # restore the results of those steps.
+                if self.encode_info_handler.status in [JOB_STATUS_CRF_SEARCH_STARTED, JOB_STATUS_PREPROCESSING_DONE]:
+                    self.output_video_streams = self.encode_info_handler.pre_encoder_data.get("output_video_streams", [])
+                    self.output_audio_streams = self.encode_info_handler.pre_encoder_data.get("output_audio_streams", [])
+                    self.output_subtitle_streams = self.encode_info_handler.pre_encoder_data.get("output_subtitle_streams", [])
+                    self.best_encoder = self.encode_info_handler.encoder or ""
+                    self.best_crf = self.encode_info_handler.crf or 0
+                    self.best_ratio = self.encode_info_handler.pre_encoder_data.get("best_ratio")
+                    time_sec = self.encode_info_handler.pre_encoder_data.get("crf_checking_time_seconds")
+                    if time_sec is not None:
+                        self.crf_checking_time = timedelta(seconds=time_sec)
+
 
     def start(self):
-        logger.debug(f"PreEncoder start for: {self.media_file.filename}")
-        try:
-            self._check_if_file_should_be_skipped()
-            self._determine_optimal_encoding_options()
+        logger.debug(f"PreEncoder start for: {self.media_file.filename} (Status: {self.encode_info_handler.status}, Manual: {self.is_manual_mode})")
 
-        except SkippedFileException:
+        if self.encode_info_handler.status == JOB_STATUS_PREPROCESSING_DONE:
+            logger.info(f"Preprocessing already completed for {self.media_file.filename}. Loading results into PreEncoder instance.")
+            # Ensure PreEncoder instance attributes are fully populated from stored data.
+            # __init__ already attempts this, but we can be more explicit here.
+            if self.encode_info_handler.pre_encoder_data:
+                self.best_encoder = self.encode_info_handler.encoder or self.encode_info_handler.pre_encoder_data.get("best_encoder", "")
+                self.best_crf = self.encode_info_handler.crf if self.encode_info_handler.crf is not None else self.encode_info_handler.pre_encoder_data.get("best_crf", 0)
+                self.output_video_streams = self.encode_info_handler.pre_encoder_data.get("output_video_streams", [])
+                self.output_audio_streams = self.encode_info_handler.pre_encoder_data.get("output_audio_streams", [])
+                self.output_subtitle_streams = self.encode_info_handler.pre_encoder_data.get("output_subtitle_streams", [])
+                self.is_manual_mode = self.encode_info_handler.pre_encoder_data.get("is_manual_mode", self.is_manual_mode)
+                self.best_ratio = self.encode_info_handler.pre_encoder_data.get("best_ratio")
+                time_sec = self.encode_info_handler.pre_encoder_data.get("crf_checking_time_seconds")
+                if time_sec is not None:
+                    self.crf_checking_time = timedelta(seconds=time_sec)
+                else: # Recalculate if not stored, though unlikely for PREPROCESSING_DONE
+                    self.crf_checking_time = timedelta(0) if self.is_manual_mode else None
+            else: # Should not happen if status is PREPROCESSING_DONE
+                logger.warning(f"Status for {self.media_file.filename} is PREPROCESSING_DONE, but pre_encoder_data is missing. Proceeding cautiously.")
+            return
+
+        try:
+            # If resuming from an incomplete pre-processing state (e.g. CRF_SEARCH_STARTED)
+            # or starting fresh (PENDING or PREPROCESSING_STARTED), run the checks and determination.
+            if self.encode_info_handler.status not in [JOB_STATUS_PREPROCESSING_DONE]:
+                if self.encode_info_handler.status not in [JOB_STATUS_CRF_SEARCH_STARTED]:
+                     # Persist current is_manual_mode early if starting fresh preprocessing
+                    current_pre_data = self.encode_info_handler.pre_encoder_data or {}
+                    current_pre_data["is_manual_mode"] = self.is_manual_mode
+                    self.encode_info_handler.dump(status=JOB_STATUS_PREPROCESSING_STARTED,
+                                                  pre_encoder_data=current_pre_data)
+
+                self._check_if_file_should_be_skipped()
+                self._determine_optimal_encoding_options() # This handles its own sub-state updates
+
+            # After _determine_optimal_encoding_options, all necessary data should be on self attributes
+            pre_encoder_results = {
+                "best_encoder": self.best_encoder,
+                "best_crf": self.best_crf,
+                "output_video_streams": self.output_video_streams,
+                "output_audio_streams": self.output_audio_streams,
+                "output_subtitle_streams": self.output_subtitle_streams,
+                "crf_checking_time_seconds": self.crf_checking_time.total_seconds() if self.crf_checking_time else None,
+                "best_ratio": self.best_ratio,
+                "is_manual_mode": self.is_manual_mode, # Final manual mode state
+            }
+            self.encode_info_handler.dump(status=JOB_STATUS_PREPROCESSING_DONE,
+                                          encoder=self.best_encoder,
+                                          crf=self.best_crf,
+                                          pre_encoder_data=pre_encoder_results)
+
+        except SkippedFileException as e:
+            self.encode_info_handler.dump(status=JOB_STATUS_SKIPPED, last_error_message=str(e))
             raise
-        except PreprocessingException as e:
-            logger.error(f"Preprocessing error for {self.media_file.filename}: {e}")
+        except (PreprocessingException, CRFSearchFailedException) as e:
+            logger.debug(f"Preprocessing error for {self.media_file.filename}: {e}")
+            is_permanent = isinstance(e, NoAudioStreamException) and not (self.args and getattr(self.args, "allow_no_audio", False))
+            current_status_on_error = JOB_STATUS_ERROR_PERMANENT if is_permanent else JOB_STATUS_ERROR_RETRYABLE
+            increment_retry_on_error = not is_permanent
+
+            self.encode_info_handler.dump(status=current_status_on_error,
+                                          last_error_message=str(e),
+                                          increment_retry_count=increment_retry_on_error)
+
             if not self.renamed_file_on_skip_or_error:
-                self.move_file_to_error_dir(
-                    error_subdir_name=f"preproc_err_{type(e).__name__}"
-                )
+                 if current_status_on_error == JOB_STATUS_ERROR_PERMANENT or \
+                    (increment_retry_on_error and self.encode_info_handler.retry_count >= MAX_ENCODE_RETRIES):
+                    error_type_name = type(e).__name__
+                    if increment_retry_on_error and self.encode_info_handler.retry_count >= MAX_ENCODE_RETRIES:
+                        error_type_name = f"max_retries_{error_type_name}"
+                        self.encode_info_handler.dump(status=JOB_STATUS_ERROR_PERMANENT, last_error_message=f"Max retries: {str(e)}")
+                    self.move_file_to_error_dir(error_subdir_name=f"preproc_err_{error_type_name}")
             raise
         except Exception as e:
             logger.error(
                 f"Unexpected error during PreEncoder.start for {self.media_file.filename}: {e}",
                 exc_info=True,
             )
+            self.encode_info_handler.dump(status=JOB_STATUS_ERROR_RETRYABLE,
+                                          last_error_message=f"Unexpected PreEncoder: {str(e)}",
+                                          increment_retry_count=True)
             if not self.renamed_file_on_skip_or_error:
-                self.move_file_to_error_dir(error_subdir_name="preproc_unexpected_err")
+                if self.encode_info_handler.retry_count >= MAX_ENCODE_RETRIES:
+                    self.encode_info_handler.dump(status=JOB_STATUS_ERROR_PERMANENT, last_error_message=f"Max retries, Unexpected PreEncoder: {str(e)}")
+                    self.move_file_to_error_dir(error_subdir_name="preproc_unexpected_err_max_retries")
             raise PreprocessingException(f"Unexpected pre-encoder failure: {e}") from e
 
     def _check_if_file_should_be_skipped(self):
@@ -167,17 +257,19 @@ class PreEncoder:
 
             if self.media_file.path.exists():
                 try:
-                    shutil.move(str(self.media_file.path), str(target_skip_path))
-                    self.renamed_file_on_skip_or_error = target_skip_path
-                    logger.info(f"Moved skipped file to {target_skip_path}")
+                    if self.media_file.path.resolve() != target_skip_path.resolve():
+                        shutil.move(str(self.media_file.path), str(target_skip_path))
+                        self.renamed_file_on_skip_or_error = target_skip_path
+                        logger.info(f"Moved skipped file to {target_skip_path}")
+                    else:
+                        logger.debug(f"Skipped file {self.media_file.filename} is already at skip target path {target_skip_path}.")
+                        self.renamed_file_on_skip_or_error = target_skip_path
                 except Exception as move_err:
                     logger.error(
                         f"Could not move skipped file {self.media_file.filename} to {target_skip_path}: {move_err}"
                     )
-                    self.renamed_file_on_skip_or_error = self.media_file.path
             else:
                 self.renamed_file_on_skip_or_error = target_skip_path
-
             raise exception_type(skip_reason)
 
     def _determine_optimal_encoding_options(self):
@@ -189,10 +281,10 @@ class PreEncoder:
         if (
             self.renamed_file_on_skip_or_error
             and self.renamed_file_on_skip_or_error.exists()
-            and self.renamed_file_on_skip_or_error != self.media_file.path
+            and self.renamed_file_on_skip_or_error.resolve() != self.media_file.path.resolve()
         ):
             logger.debug(
-                f"File {self.media_file.filename} already moved to {self.renamed_file_on_skip_or_error}. Skipping move_file_to_error_dir to {error_subdir_name}."
+                f"File {self.media_file.filename} already moved/renamed to {self.renamed_file_on_skip_or_error}. Skipping move_file_to_error_dir to {error_subdir_name}."
             )
             return
 
@@ -203,19 +295,22 @@ class PreEncoder:
         target_error_path = target_error_dir / self.media_file.filename
 
         if self.media_file.path.exists():
-            try:
-                shutil.move(str(self.media_file.path), str(target_error_path))
+            if self.media_file.path.resolve() != target_error_path.resolve():
+                try:
+                    shutil.move(str(self.media_file.path), str(target_error_path))
+                    self.renamed_file_on_skip_or_error = target_error_path
+                    logger.info(
+                        f"Moved file {self.media_file.filename} to error directory: {target_error_path}"
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"Failed to move file {self.media_file.filename} to error dir {target_error_path}: {e}"
+                    )
+            else:
+                logger.debug(f"File {self.media_file.filename} is already at error target path {target_error_path}.")
                 self.renamed_file_on_skip_or_error = target_error_path
-                logger.info(
-                    f"Moved file {self.media_file.filename} to error directory: {target_error_path}"
-                )
-            except Exception as e:
-                logger.error(
-                    f"Failed to move file {self.media_file.filename} to error dir {target_error_path}: {e}"
-                )
-                self.renamed_file_on_skip_or_error = self.media_file.path
         else:
-            logger.warning(
+            logger.debug(
                 f"Original file {self.media_file.path} not found, cannot move to error dir {target_error_path}."
             )
             self.renamed_file_on_skip_or_error = target_error_path
@@ -238,36 +333,40 @@ class PreVideoEncoder(PreEncoder):
             low_bitrate_threshold_config=VIDEO_BITRATE_LOW_THRESHOLD,
             output_base_dir_config=VIDEO_OUT_DIR_ROOT,
         )
-        self.available_encoders_cfg: Tuple[str] = AVAILABLE_ENCODERS
+        self.available_encoders_cfg: Tuple[str, ...] = AVAILABLE_ENCODERS
 
     def _determine_optimal_encoding_options(self):
-        self._select_output_video_streams()
-        try:
-            self._select_output_audio_streams()
-        except NoAudioStreamException as e:
-            if self.args and getattr(self.args, "allow_no_audio", False):
-                logger.warning(
-                    f"No suitable audio stream for {self.media_file.filename}: {e}. Encoding will proceed without audio as per --allow-no-audio."
-                )
-                self.output_audio_streams = []
-            else:
-                logger.error(
-                    f"No suitable audio stream for {self.media_file.filename}: {e}. File will be moved to error directory."
-                )
-                self.move_file_to_error_dir(
-                    error_subdir_name=VIDEO_NO_AUDIO_FOUND_ERROR_DIR.name
-                )
-                raise
-        self._select_output_subtitle_streams()
+        # If resuming, output_streams might have been populated by __init__
+        # from encode_info_handler.pre_encoder_data
+        # If not, select them now.
+        if not (self.output_video_streams or self.output_audio_streams or self.output_subtitle_streams):
+            logger.debug(f"No stream selections loaded for {self.media_file.filename}, performing selection now.")
+            self._select_output_video_streams()
+            try:
+                self._select_output_audio_streams()
+            except NoAudioStreamException as e:
+                if self.args and getattr(self.args, "allow_no_audio", False):
+                    logger.warning(
+                        f"No suitable audio stream for {self.media_file.filename}: {e}. Encoding will proceed without audio as per --allow-no-audio."
+                    )
+                    self.output_audio_streams = []
+                else:
+                    raise # Caught by self.start()
+            self._select_output_subtitle_streams()
 
-        if self.encode_info_handler.load():
-            self.best_crf = self.encode_info_handler.crf
-            self.best_encoder = self.encode_info_handler.encoder
-            self.is_manual_mode = True
-            logger.info(
-                f"Loaded encode params from cache for {self.media_file.filename}: Encoder {self.best_encoder}, CRF {self.best_crf}. Treating as manual."
-            )
-            return
+            # Update pre_encoder_data with these selections immediately
+            current_pre_data = self.encode_info_handler.pre_encoder_data or {}
+            current_pre_data.update({
+                "output_video_streams": self.output_video_streams,
+                "output_audio_streams": self.output_audio_streams,
+                "output_subtitle_streams": self.output_subtitle_streams,
+                "is_manual_mode": self.is_manual_mode, # Current manual mode state
+            })
+            # The status is likely PREPROCESSING_STARTED or CRF_SEARCH_STARTED here
+            self.encode_info_handler.dump(pre_encoder_data=current_pre_data)
+        else:
+            logger.debug(f"Stream selections already populated for {self.media_file.filename} (likely from resume).")
+
 
         if self.is_manual_mode:
             self.best_crf = MANUAL_CRF
@@ -277,25 +376,65 @@ class PreVideoEncoder(PreEncoder):
                 else AV1_ENCODER
             )
             self.crf_checking_time = timedelta(0)
+            self.best_ratio = None
             logger.info(
                 f"Manual mode for {self.media_file.filename}: Using Encoder {self.best_encoder}, CRF {self.best_crf}."
             )
-            self.encode_info_handler.dump(
-                encoder=self.best_encoder,
-                crf=self.best_crf,
-                ori_video_path=self.media_file.path.as_posix(),
-            )
             return
 
-        crf_search_start_time = datetime.now()
-        current_best_ratio_found: Optional[float] = None
+        # --- CRF Search Logic (Non-Manual Mode) ---
+        # If status indicates CRF search hasn't started, or if it was PREPROCESSING_STARTED,
+        # transition to CRF_SEARCH_STARTED.
+        if self.encode_info_handler.status not in [JOB_STATUS_CRF_SEARCH_STARTED, JOB_STATUS_PREPROCESSING_DONE]:
+            self.encode_info_handler.dump(status=JOB_STATUS_CRF_SEARCH_STARTED,
+                                          encoder="", crf=0, # Reset search params
+                                          pre_encoder_data=self.encode_info_handler.pre_encoder_data) # Preserve stream selections
 
-        for encoder_candidate in self.available_encoders_cfg:
+        crf_search_start_time = datetime.now()
+        # Restore current bests if resuming a multi-encoder search
+        # These are now initialized in __init__ if status was CRF_SEARCH_STARTED
+        current_best_ratio_found: Optional[float] = self.best_ratio
+        # best_encoder and best_crf are already on self from __init__ if resuming
+
+        start_encoder_index = 0
+        # If resuming a CRF search, determine which encoder to start/continue with
+        if self.encode_info_handler.status == JOB_STATUS_CRF_SEARCH_STARTED and self.encode_info_handler.encoder:
             try:
+                encoder_in_progress = self.encode_info_handler.encoder
+                start_encoder_index = self.available_encoders_cfg.index(encoder_in_progress)
+                # If a non-zero CRF value is stored for this encoder, its search was completed.
+                # So, we should start with the *next* encoder in the list.
+                if self.encode_info_handler.crf != 0:
+                    logger.info(f"CRF search for '{encoder_in_progress}' was previously completed (CRF: {self.encode_info_handler.crf}). Resuming with next encoder.")
+                    start_encoder_index += 1 # Move to the next one
+                else: # CRF is 0, means this encoder's search was in progress or failed
+                    logger.info(f"Resuming CRF search, starting/retrying with encoder: '{encoder_in_progress}'.")
+            except ValueError:
+                logger.warning(f"Encoder '{self.encode_info_handler.encoder}' from progress not in current config {self.available_encoders_cfg}. Restarting CRF search.")
+                start_encoder_index = 0
+                current_best_ratio_found = None # Reset
+                self.best_encoder = ""
+                self.best_crf = 0
+                self.best_ratio = None
+        elif self.encode_info_handler.status != JOB_STATUS_CRF_SEARCH_STARTED : # Starting fresh if not resuming CRF search
+             current_best_ratio_found = None
+             self.best_encoder = ""
+             self.best_crf = 0
+             self.best_ratio = None
+
+
+        for i in range(start_encoder_index, len(self.available_encoders_cfg)):
+            encoder_candidate = self.available_encoders_cfg[i]
+            logger.debug(f"Starting/Resuming CRF search for encoder: {encoder_candidate} on {self.media_file.filename}")
+            try:
+                self.encode_info_handler.dump(encoder=encoder_candidate, crf=0, # Mark current search, crf=0 means "in progress for this encoder"
+                                              pre_encoder_data=self.encode_info_handler.pre_encoder_data) # Keep existing pre_encoder_data
+
                 crf_val, encoded_ratio_val = self._perform_crf_search_for_encoder(
                     encoder_candidate
                 )
                 encoded_ratio_float = encoded_ratio_val / 100.0
+                logger.debug(f"CRF search for {encoder_candidate} successful: CRF {crf_val}, Ratio {encoded_ratio_float:.2%}")
 
                 if (
                     current_best_ratio_found is None
@@ -305,59 +444,52 @@ class PreVideoEncoder(PreEncoder):
                     self.best_encoder = encoder_candidate
                     self.best_crf = crf_val
                     self.best_ratio = encoded_ratio_float
+                    # Persist the best found *so far* (encoder and its CRF)
+                    # This is important if the overall search across multiple encoders is interrupted.
+                    # The status remains CRF_SEARCH_STARTED.
+                    self.encode_info_handler.dump(encoder=self.best_encoder, crf=self.best_crf,
+                                                  pre_encoder_data=self.encode_info_handler.pre_encoder_data) # Store the CRF for this best encoder
 
             except CRFSearchFailedException as e:
-                logger.debug(
+                logger.warning(
                     f"CRF search failed for encoder {encoder_candidate} on {self.media_file.filename}: {e}. Trying next encoder if available."
                 )
+                # If this encoder failed, ensure its CRF is not mistakenly stored as a "best" by resetting its CRF in progress.
+                if self.encode_info_handler.encoder == encoder_candidate:
+                     self.encode_info_handler.dump(crf=0, pre_encoder_data=self.encode_info_handler.pre_encoder_data)
                 continue
             except Exception as e:
                 logger.error(
                     f"Unexpected error during CRF search for {encoder_candidate} on {self.media_file.filename}: {e}",
                     exc_info=True,
                 )
+                if self.encode_info_handler.encoder == encoder_candidate:
+                    self.encode_info_handler.dump(crf=0, pre_encoder_data=self.encode_info_handler.pre_encoder_data)
                 continue
 
         self.crf_checking_time = datetime.now() - crf_search_start_time
 
         if not self.best_encoder or self.best_crf == 0:
-            logger.warning(
-                f"CRF search failed for all configured encoders for {self.media_file.filename}. Using fallback manual settings (CRF: {MANUAL_CRF})."
-            )
-            self.best_crf = MANUAL_CRF
-            self.best_encoder = (
-                self.available_encoders_cfg[0]
-                if self.available_encoders_cfg
-                else AV1_ENCODER
-            )
-            self.is_manual_mode = True
-            self.best_ratio = None
-            self.encode_info_handler.dump(
-                encoder=self.best_encoder,
-                crf=self.best_crf,
-                ori_video_path=self.media_file.path.as_posix(),
-            )
+            final_error_msg = f"CRF search did not find a suitable encoder/CRF for {self.media_file.filename} after trying all candidates."
+            logger.debug(final_error_msg)
+            raise CRFSearchFailedException(final_error_msg)
         else:
             ratio_log_str = (
-                f"{self.best_ratio:.2f}" if self.best_ratio is not None else "N/A"
+                f"{self.best_ratio:.2%}" if self.best_ratio is not None else "N/A"
             )
             logger.debug(
-                f"Determined best params for {self.media_file.filename}: Encoder {self.best_encoder}, CRF {self.best_crf}, Ratio {ratio_log_str}. Time: {format_timedelta(self.crf_checking_time)}"
+                f"Optimal pre-encode params determined for {self.media_file.filename}: Encoder {self.best_encoder}, CRF {self.best_crf}, Ratio {ratio_log_str}. Time: {format_timedelta(self.crf_checking_time)}"
             )
-            self.encode_info_handler.dump(
-                encoder=self.best_encoder,
-                crf=self.best_crf,
-                ori_video_path=self.media_file.path.as_posix(),
-            )
+
 
     def _perform_crf_search_for_encoder(self, encoder_to_test: str) -> Tuple[int, int]:
         if (
             self.renamed_file_on_skip_or_error
             and self.renamed_file_on_skip_or_error.exists()
-            and self.renamed_file_on_skip_or_error != self.media_file.path
+            and self.renamed_file_on_skip_or_error.resolve() != self.media_file.path.resolve()
         ):
             logger.info(
-                f"CRF search: File {self.media_file.filename} appears to have been moved/renamed to {self.renamed_file_on_skip_or_error}. Skipping CRF search."
+                f"CRF search: File {self.media_file.filename} appears to have been moved/renamed to {self.renamed_file_on_skip_or_error}. Skipping CRF search for {encoder_to_test}."
             )
             raise SkippedFileException(
                 f"File {self.media_file.filename} no longer at original path for CRF search."
@@ -369,36 +501,13 @@ class PreVideoEncoder(PreEncoder):
             and hasattr(self.args, "temp_work_dir")
             and self.args.temp_work_dir
         ):
-            temp_dir_for_ab_av1 = str(self.args.temp_work_dir)
+            temp_dir_for_ab_av1 = str(Path(self.args.temp_work_dir).resolve())
             logger.debug(
                 f"Using specified temporary directory for ab-av1: {temp_dir_for_ab_av1}"
             )
 
-        cmd_parts = [
-            "ab-av1",
-            "crf-search",
-            "-e",
-            encoder_to_test,
-            "-i",
-            str(self.media_file.path),  # Ensure path is string
-            "--sample-every",
-            SAMPLE_EVERY,
-            "--max-encoded-percent",
-            str(MAX_ENCODED_PERCENT),  # Ensure numeric args are strings
-            "--min-vmaf",
-            str(TARGET_VMAF),  # Ensure numeric args are strings
-        ]
-        if temp_dir_for_ab_av1:
-            cmd_parts.extend(["--temp-dir", temp_dir_for_ab_av1])
-
-        cmd_str = " ".join(
-            f'"{part}"' if " " in part else part for part in cmd_parts
-        )  # Basic quoting for parts with spaces
-        # More robust quoting might be needed if paths/args have special shell characters.
-        # For `shell=True` in `run_cmd`, often simpler to just build the full string carefully.
-        # Rebuilding cmd_str more carefully for shell=True:
         cmd_str = (
-            f'ab-av1 crf-search -e "{encoder_to_test}" -i "{self.media_file.path}" '
+            f'ab-av1 crf-search -e "{encoder_to_test}" -i "{self.media_file.path.resolve()}" '
             f'--sample-every "{SAMPLE_EVERY}" --max-encoded-percent "{MAX_ENCODED_PERCENT}" '
             f'--min-vmaf "{TARGET_VMAF}"'
         )
@@ -409,23 +518,30 @@ class PreVideoEncoder(PreEncoder):
             f"Executing CRF search for {self.media_file.filename} with {encoder_to_test}: {cmd_str}"
         )
 
-        crf_check_error_dir = (
-            self.error_dir_base / "crf_check_errors" / self.media_file.relative_dir
-        )
-        crf_check_error_dir.mkdir(parents=True, exist_ok=True)
-
         res = run_cmd(
             cmd_str,
             src_file_for_log=self.media_file.path,
-            error_log_dir_for_run_cmd=crf_check_error_dir,
             show_cmd=__debug__,
         )
 
         if res is None or res.returncode != 0:
-            err_msg = f"ab-av1 crf-search command failed. Return code: {res.returncode if res else 'N/A'}."
+            err_msg = f"ab-av1 crf-search command failed for {encoder_to_test}. Return code: {res.returncode if res else 'N/A'}."
             if res and res.stderr:
                 err_msg += f" Stderr: {res.stderr}"
             logger.debug(err_msg)
+
+            crf_check_error_dir = (
+                self.error_dir_base / "crf_check_errors" / self.media_file.relative_dir
+            )
+            crf_check_error_dir.mkdir(parents=True, exist_ok=True)
+            debug_ab_av1_output_path = (
+                crf_check_error_dir / f"{self.media_file.filename}.{encoder_to_test}.ab_av1_output.txt"
+            )
+            with debug_ab_av1_output_path.open("w", encoding="utf-8") as f_debug:
+                f_debug.write(
+                    f"Command: {cmd_str}\n\nStdout:\n{res.stdout if res else 'N/A'}\n\nStderr:\n{res.stderr if res else 'N/A'}"
+                )
+            logger.info(f"ab-av1 CRF search debug output logged to: {debug_ab_av1_output_path}")
             raise CRFSearchFailedException(err_msg)
 
         stdout_lower = res.stdout.lower()
@@ -441,7 +557,7 @@ class PreVideoEncoder(PreEncoder):
 
         if crf_match and encoded_ratio_percent is not None:
             crf = int(crf_match.group(1))
-            logger.info(
+            logger.debug(
                 f"CRF search for {encoder_to_test} on {self.media_file.filename} resulted in: CRF {crf}, Ratio {encoded_ratio_percent}%"
             )
             if (
@@ -456,13 +572,18 @@ class PreVideoEncoder(PreEncoder):
         else:
             err_msg = f"Could not parse CRF and/or Ratio from ab-av1 output for {encoder_to_test}. Output: {res.stdout}"
             logger.error(err_msg)
+            crf_check_error_dir = (
+                self.error_dir_base / "crf_check_errors" / self.media_file.relative_dir
+            )
+            crf_check_error_dir.mkdir(parents=True, exist_ok=True)
             debug_ab_av1_output_path = (
-                crf_check_error_dir / f"{self.media_file.filename}.ab_av1_output.txt"
+                crf_check_error_dir / f"{self.media_file.filename}.{encoder_to_test}.ab_av1_output.txt"
             )
             with debug_ab_av1_output_path.open("w", encoding="utf-8") as f_debug:
                 f_debug.write(
                     f"Command: {cmd_str}\n\nStdout:\n{res.stdout}\n\nStderr:\n{res.stderr if res else 'N/A'}"
                 )
+            logger.info(f"ab-av1 CRF search debug output (parse error) logged to: {debug_ab_av1_output_path}")
             raise CRFSearchFailedException(err_msg)
 
     def _select_output_video_streams(self):
@@ -476,13 +597,13 @@ class PreVideoEncoder(PreEncoder):
         if len(self.media_file.video_streams) == 1:
             stream = self.media_file.video_streams[0]
             if (
-                "avg_frame_rate" in stream
-                and stream.get("codec_name") not in SKIP_VIDEO_CODEC_NAMES
+                stream.get("avg_frame_rate") and stream.get("avg_frame_rate") != "0/0"
+                and stream.get("codec_name","").lower() not in SKIP_VIDEO_CODEC_NAMES
             ):
                 self.output_video_streams = [stream]
             else:
                 logger.warning(
-                    f"Single video stream in {self.media_file.filename} is unsuitable (no fps or excluded codec). No video output."
+                    f"Single video stream in {self.media_file.filename} is unsuitable (no valid fps or excluded codec). No video output."
                 )
                 self.output_video_streams = []
             return
@@ -491,8 +612,7 @@ class PreVideoEncoder(PreEncoder):
         for stream in self.media_file.video_streams:
             codec_name = stream.get("codec_name", "").lower()
             if (
-                "avg_frame_rate" in stream
-                and stream["avg_frame_rate"] != "0/0"
+                stream.get("avg_frame_rate") and stream.get("avg_frame_rate") != "0/0"
                 and codec_name not in SKIP_VIDEO_CODEC_NAMES
             ):
                 suitable_video_streams.append(stream)
@@ -519,7 +639,7 @@ class PreVideoEncoder(PreEncoder):
                 self.output_audio_streams = [stream]
             else:
                 raise NoAudioStreamException(
-                    f"Single audio stream in {self.media_file.filename} does not match desired languages."
+                    f"Single audio stream in {self.media_file.filename} does not match desired languages or failed detection."
                 )
             return
 
@@ -535,10 +655,9 @@ class PreVideoEncoder(PreEncoder):
                         continue
                 except ValueError:
                     logger.debug(
-                        f"Skipping audio stream index {stream.get('index')} for {self.media_file.filename}: invalid sample rate format."
+                        f"Skipping audio stream index {stream.get('index')} for {self.media_file.filename}: invalid sample rate format '{stream.get('sample_rate')}'."
                     )
                     continue
-
             if self._is_audio_stream_language_suitable(stream):
                 suitable_audio_streams.append(stream)
 
@@ -546,33 +665,36 @@ class PreVideoEncoder(PreEncoder):
             raise NoAudioStreamException(
                 f"No audio streams match desired languages after filtering for {self.media_file.filename}."
             )
-
         self.output_audio_streams = suitable_audio_streams
         logger.debug(
             f"Selected {len(self.output_audio_streams)} audio streams for {self.media_file.filename}."
         )
 
     def _is_audio_stream_language_suitable(self, stream_data: Dict) -> bool:
-        lang_tag = stream_data.get("tags", {}).get("language", "").lower()
+        lang_tag = stream_data.get("tags", {}).get("language", "").lower().strip()
+
         if lang_tag and lang_tag in LANGUAGE_WORDS:
+            logger.debug(f"Audio stream index {stream_data.get('index')} has suitable language tag: {lang_tag}")
             return True
+
         if lang_tag and lang_tag != "und":
             logger.debug(
-                f"Audio stream index {stream_data.get('index')} has language '{lang_tag}', not in desired list. It is considered unsuitable."
+                f"Audio stream index {stream_data.get('index')} has language '{lang_tag}', not in desired list. Considered unsuitable."
             )
             return False
 
         if not lang_tag or lang_tag == "und":
+            lang_tag_if_exists = stream_data.get("tags", {}).get("language", "no")
             logger.info(
-                f"Audio stream index {stream_data.get('index')} for {self.media_file.filename} has no definitive language tag. Attempting language detection."
+                f"Audio stream index {stream_data.get('index')} for {self.media_file.filename} has '{lang_tag_if_exists}' language tag. Attempting language detection."
             )
             try:
                 file_duration = (
                     self.media_file.duration if self.media_file.duration > 0 else 0
                 )
-                temp_dir_for_detection = (
-                    getattr(self.args, "temp_work_dir", None) if self.args else None
-                )
+                temp_dir_for_detection_str = getattr(self.args, "temp_work_dir", None)
+                temp_dir_for_detection = Path(temp_dir_for_detection_str) if temp_dir_for_detection_str else None
+
                 detected_lang = detect_audio_language_multi_segments(
                     self.media_file.path,
                     stream_data,
@@ -588,7 +710,6 @@ class PreVideoEncoder(PreEncoder):
                     f"Language detection failed for audio stream index {stream_data.get('index')} of {self.media_file.filename}: {det_ex}"
                 )
                 return False
-
         return False
 
     def _select_output_subtitle_streams(self):
@@ -598,11 +719,10 @@ class PreVideoEncoder(PreEncoder):
 
         suitable_subtitle_streams = []
         for stream in self.media_file.subtitle_streams:
-            lang_tag = stream.get("tags", {}).get("language", "").lower()
+            lang_tag = stream.get("tags", {}).get("language", "").lower().strip()
             if lang_tag and lang_tag in LANGUAGE_WORDS:
                 suitable_subtitle_streams.append(stream)
             elif not lang_tag or lang_tag == "und":
                 logger.debug(f"Subtitle stream index {stream.get('index')} for {self.media_file.filename} has undetermined or no language tag. Skipping.")
-
         self.output_subtitle_streams = suitable_subtitle_streams
         logger.debug(f"Selected {len(self.output_subtitle_streams)} subtitle streams for {self.media_file.filename}.")

@@ -1,3 +1,5 @@
+# src/config/common.py
+
 from pathlib import Path
 
 # Logging configuration
@@ -27,6 +29,7 @@ COMMAND_TEXT = "cmd.txt"  # Command text file
 SUCCESS_LOG_RANDOM_LENGTH = (
     10  # Random length to mitigate logging issues in multi-process environments
 )
+MAX_ENCODE_RETRIES = 3  # Maximum number of retries for an encoding job
 
 # Language codes, must be in lower cases
 LANGUAGE_WORDS = (
@@ -55,3 +58,14 @@ MODULE_UPDATE_PATH = Path(r"C:\Tools\updater")  # Path for the updater module
 
 # files
 MINIMUM_FILE_SIZE = 100_000  # video files lower than this size will be deleted. unit: B
+
+# Job Status Constants for EncodeInfo
+JOB_STATUS_PENDING = "pending"
+JOB_STATUS_PREPROCESSING_STARTED = "preprocessing_started"
+JOB_STATUS_CRF_SEARCH_STARTED = "crf_search_started"
+JOB_STATUS_PREPROCESSING_DONE = "preprocessing_done"
+JOB_STATUS_ENCODING_FFMPEG_STARTED = "encoding_ffmpeg_started"
+JOB_STATUS_COMPLETED = "completed"
+JOB_STATUS_ERROR_RETRYABLE = "error_retryable"
+JOB_STATUS_ERROR_PERMANENT = "error_permanent"
+JOB_STATUS_SKIPPED = "skipped" # For files skipped due to pre-checks not resulting in error

@@ -330,7 +330,7 @@ class SuccessLog(Log):
                 )
 
         if not all_discovered_entries:
-            logger.info("No log entries found to combine.")
+            logger.debug("No log entries found to combine.")
             # If final_combined_log_path exists but is now empty, we might want to delete it or leave it.
             # For now, if no entries, don't write an empty file unless it didn't exist.
             if not final_combined_log_path.exists():
