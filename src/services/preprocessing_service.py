@@ -18,7 +18,7 @@ from ..utils.format_utils import format_timedelta
 from ..domain.media import MediaFile
 from ..domain.exceptions import (
     PreprocessingException,
-    CRFSearchFailedException,
+    CRFSearchFailedException, # Still imported, but its handling changes
     SkippedFileException,
     NoAudioStreamException,
     FileAlreadyEncodedException,
@@ -43,10 +43,10 @@ from ..config.video import (
     SAMPLE_EVERY,
     MAX_ENCODED_PERCENT,
     TARGET_VMAF,
-    AV1_ENCODER,
-    MANUAL_CRF,
+    AV1_ENCODER, # Default AV1 encoder
+    MANUAL_CRF, # Default manual CRF
     SKIP_VIDEO_CODEC_NAMES,
-    ENCODERS as AVAILABLE_ENCODERS,
+    ENCODERS as AVAILABLE_ENCODERS, # List of available encoders
     VIDEO_NO_AUDIO_FOUND_ERROR_DIR,
 )
 
@@ -105,16 +105,12 @@ class PreEncoder:
         if not self.encode_info_handler.load():
             self.encode_info_handler.dump(status=JOB_STATUS_PENDING,
                                           ori_video_path=str(self.media_file.path),
-                                          pre_encoder_data={"is_manual_mode": self.is_manual_mode}) # Store initial manual mode
+                                          pre_encoder_data={"is_manual_mode": self.is_manual_mode})
         else:
-            # Restore state from EncodeInfo
             if self.encode_info_handler.pre_encoder_data:
                 loaded_manual_mode = self.encode_info_handler.pre_encoder_data.get("is_manual_mode")
                 if loaded_manual_mode is not None:
                     self.is_manual_mode = loaded_manual_mode
-
-                # If resuming a state where pre-processing steps were partially complete,
-                # restore the results of those steps.
                 if self.encode_info_handler.status in [JOB_STATUS_CRF_SEARCH_STARTED, JOB_STATUS_PREPROCESSING_DONE]:
                     self.output_video_streams = self.encode_info_handler.pre_encoder_data.get("output_video_streams", [])
                     self.output_audio_streams = self.encode_info_handler.pre_encoder_data.get("output_audio_streams", [])
@@ -132,8 +128,6 @@ class PreEncoder:
 
         if self.encode_info_handler.status == JOB_STATUS_PREPROCESSING_DONE:
             logger.info(f"Preprocessing already completed for {self.media_file.filename}. Loading results into PreEncoder instance.")
-            # Ensure PreEncoder instance attributes are fully populated from stored data.
-            # __init__ already attempts this, but we can be more explicit here.
             if self.encode_info_handler.pre_encoder_data:
                 self.best_encoder = self.encode_info_handler.encoder or self.encode_info_handler.pre_encoder_data.get("best_encoder", "")
                 self.best_crf = self.encode_info_handler.crf if self.encode_info_handler.crf is not None else self.encode_info_handler.pre_encoder_data.get("best_crf", 0)
@@ -145,27 +139,22 @@ class PreEncoder:
                 time_sec = self.encode_info_handler.pre_encoder_data.get("crf_checking_time_seconds")
                 if time_sec is not None:
                     self.crf_checking_time = timedelta(seconds=time_sec)
-                else: # Recalculate if not stored, though unlikely for PREPROCESSING_DONE
+                else:
                     self.crf_checking_time = timedelta(0) if self.is_manual_mode else None
-            else: # Should not happen if status is PREPROCESSING_DONE
+            else:
                 logger.warning(f"Status for {self.media_file.filename} is PREPROCESSING_DONE, but pre_encoder_data is missing. Proceeding cautiously.")
             return
 
         try:
-            # If resuming from an incomplete pre-processing state (e.g. CRF_SEARCH_STARTED)
-            # or starting fresh (PENDING or PREPROCESSING_STARTED), run the checks and determination.
-            if self.encode_info_handler.status not in [JOB_STATUS_PREPROCESSING_DONE]:
-                if self.encode_info_handler.status not in [JOB_STATUS_CRF_SEARCH_STARTED]:
-                     # Persist current is_manual_mode early if starting fresh preprocessing
-                    current_pre_data = self.encode_info_handler.pre_encoder_data or {}
-                    current_pre_data["is_manual_mode"] = self.is_manual_mode
-                    self.encode_info_handler.dump(status=JOB_STATUS_PREPROCESSING_STARTED,
-                                                  pre_encoder_data=current_pre_data)
+            if self.encode_info_handler.status not in [JOB_STATUS_CRF_SEARCH_STARTED]:
+                current_pre_data = self.encode_info_handler.pre_encoder_data or {}
+                current_pre_data["is_manual_mode"] = self.is_manual_mode
+                self.encode_info_handler.dump(status=JOB_STATUS_PREPROCESSING_STARTED,
+                                              pre_encoder_data=current_pre_data)
 
-                self._check_if_file_should_be_skipped()
-                self._determine_optimal_encoding_options() # This handles its own sub-state updates
+            self._check_if_file_should_be_skipped()
+            self._determine_optimal_encoding_options()
 
-            # After _determine_optimal_encoding_options, all necessary data should be on self attributes
             pre_encoder_results = {
                 "best_encoder": self.best_encoder,
                 "best_crf": self.best_crf,
@@ -174,7 +163,7 @@ class PreEncoder:
                 "output_subtitle_streams": self.output_subtitle_streams,
                 "crf_checking_time_seconds": self.crf_checking_time.total_seconds() if self.crf_checking_time else None,
                 "best_ratio": self.best_ratio,
-                "is_manual_mode": self.is_manual_mode, # Final manual mode state
+                "is_manual_mode": self.is_manual_mode,
             }
             self.encode_info_handler.dump(status=JOB_STATUS_PREPROCESSING_DONE,
                                           encoder=self.best_encoder,
@@ -184,8 +173,8 @@ class PreEncoder:
         except SkippedFileException as e:
             self.encode_info_handler.dump(status=JOB_STATUS_SKIPPED, last_error_message=str(e))
             raise
-        except (PreprocessingException, CRFSearchFailedException) as e:
-            logger.debug(f"Preprocessing error for {self.media_file.filename}: {e}")
+        except PreprocessingException as e: # Includes NoAudioStreamException if not allowed
+            logger.error(f"Controlled Preprocessing error for {self.media_file.filename}: {e}")
             is_permanent = isinstance(e, NoAudioStreamException) and not (self.args and getattr(self.args, "allow_no_audio", False))
             current_status_on_error = JOB_STATUS_ERROR_PERMANENT if is_permanent else JOB_STATUS_ERROR_RETRYABLE
             increment_retry_on_error = not is_permanent
@@ -203,7 +192,7 @@ class PreEncoder:
                         self.encode_info_handler.dump(status=JOB_STATUS_ERROR_PERMANENT, last_error_message=f"Max retries: {str(e)}")
                     self.move_file_to_error_dir(error_subdir_name=f"preproc_err_{error_type_name}")
             raise
-        except Exception as e:
+        except Exception as e: # Catch-all for unexpected errors during pre-encoding
             logger.error(
                 f"Unexpected error during PreEncoder.start for {self.media_file.filename}: {e}",
                 exc_info=True,
@@ -215,7 +204,9 @@ class PreEncoder:
                 if self.encode_info_handler.retry_count >= MAX_ENCODE_RETRIES:
                     self.encode_info_handler.dump(status=JOB_STATUS_ERROR_PERMANENT, last_error_message=f"Max retries, Unexpected PreEncoder: {str(e)}")
                     self.move_file_to_error_dir(error_subdir_name="preproc_unexpected_err_max_retries")
+            # Re-raise as PreprocessingException to signal failure in this stage
             raise PreprocessingException(f"Unexpected pre-encoder failure: {e}") from e
+
 
     def _check_if_file_should_be_skipped(self):
         skip_reason = None
@@ -310,7 +301,7 @@ class PreEncoder:
                 logger.debug(f"File {self.media_file.filename} is already at error target path {target_error_path}.")
                 self.renamed_file_on_skip_or_error = target_error_path
         else:
-            logger.debug(
+            logger.warning(
                 f"Original file {self.media_file.path} not found, cannot move to error dir {target_error_path}."
             )
             self.renamed_file_on_skip_or_error = target_error_path
@@ -336,9 +327,6 @@ class PreVideoEncoder(PreEncoder):
         self.available_encoders_cfg: Tuple[str, ...] = AVAILABLE_ENCODERS
 
     def _determine_optimal_encoding_options(self):
-        # If resuming, output_streams might have been populated by __init__
-        # from encode_info_handler.pre_encoder_data
-        # If not, select them now.
         if not (self.output_video_streams or self.output_audio_streams or self.output_subtitle_streams):
             logger.debug(f"No stream selections loaded for {self.media_file.filename}, performing selection now.")
             self._select_output_video_streams()
@@ -351,22 +339,18 @@ class PreVideoEncoder(PreEncoder):
                     )
                     self.output_audio_streams = []
                 else:
-                    raise # Caught by self.start()
+                    raise
             self._select_output_subtitle_streams()
-
-            # Update pre_encoder_data with these selections immediately
             current_pre_data = self.encode_info_handler.pre_encoder_data or {}
             current_pre_data.update({
                 "output_video_streams": self.output_video_streams,
                 "output_audio_streams": self.output_audio_streams,
                 "output_subtitle_streams": self.output_subtitle_streams,
-                "is_manual_mode": self.is_manual_mode, # Current manual mode state
+                "is_manual_mode": self.is_manual_mode,
             })
-            # The status is likely PREPROCESSING_STARTED or CRF_SEARCH_STARTED here
             self.encode_info_handler.dump(pre_encoder_data=current_pre_data)
         else:
             logger.debug(f"Stream selections already populated for {self.media_file.filename} (likely from resume).")
-
 
         if self.is_manual_mode:
             self.best_crf = MANUAL_CRF
@@ -382,59 +366,49 @@ class PreVideoEncoder(PreEncoder):
             )
             return
 
-        # --- CRF Search Logic (Non-Manual Mode) ---
-        # If status indicates CRF search hasn't started, or if it was PREPROCESSING_STARTED,
-        # transition to CRF_SEARCH_STARTED.
         if self.encode_info_handler.status not in [JOB_STATUS_CRF_SEARCH_STARTED, JOB_STATUS_PREPROCESSING_DONE]:
             self.encode_info_handler.dump(status=JOB_STATUS_CRF_SEARCH_STARTED,
-                                          encoder="", crf=0, # Reset search params
-                                          pre_encoder_data=self.encode_info_handler.pre_encoder_data) # Preserve stream selections
+                                          encoder="", crf=0,
+                                          pre_encoder_data=self.encode_info_handler.pre_encoder_data)
 
         crf_search_start_time = datetime.now()
-        # Restore current bests if resuming a multi-encoder search
-        # These are now initialized in __init__ if status was CRF_SEARCH_STARTED
         current_best_ratio_found: Optional[float] = self.best_ratio
-        # best_encoder and best_crf are already on self from __init__ if resuming
-
         start_encoder_index = 0
-        # If resuming a CRF search, determine which encoder to start/continue with
         if self.encode_info_handler.status == JOB_STATUS_CRF_SEARCH_STARTED and self.encode_info_handler.encoder:
             try:
                 encoder_in_progress = self.encode_info_handler.encoder
                 start_encoder_index = self.available_encoders_cfg.index(encoder_in_progress)
-                # If a non-zero CRF value is stored for this encoder, its search was completed.
-                # So, we should start with the *next* encoder in the list.
-                if self.encode_info_handler.crf != 0:
+                if self.encode_info_handler.crf != 0: # CRF already found for this encoder
                     logger.info(f"CRF search for '{encoder_in_progress}' was previously completed (CRF: {self.encode_info_handler.crf}). Resuming with next encoder.")
-                    start_encoder_index += 1 # Move to the next one
-                else: # CRF is 0, means this encoder's search was in progress or failed
+                    start_encoder_index += 1
+                else: # CRF=0 means it was in progress or failed for this encoder
                     logger.info(f"Resuming CRF search, starting/retrying with encoder: '{encoder_in_progress}'.")
             except ValueError:
                 logger.warning(f"Encoder '{self.encode_info_handler.encoder}' from progress not in current config {self.available_encoders_cfg}. Restarting CRF search.")
                 start_encoder_index = 0
-                current_best_ratio_found = None # Reset
+                current_best_ratio_found = None
                 self.best_encoder = ""
                 self.best_crf = 0
                 self.best_ratio = None
-        elif self.encode_info_handler.status != JOB_STATUS_CRF_SEARCH_STARTED : # Starting fresh if not resuming CRF search
+        elif self.encode_info_handler.status != JOB_STATUS_CRF_SEARCH_STARTED : # Fresh start if not resuming CRF search specifically
              current_best_ratio_found = None
              self.best_encoder = ""
              self.best_crf = 0
              self.best_ratio = None
 
-
+        all_searches_failed_flag = True # Assume failure until one succeeds
         for i in range(start_encoder_index, len(self.available_encoders_cfg)):
             encoder_candidate = self.available_encoders_cfg[i]
-            logger.debug(f"Starting/Resuming CRF search for encoder: {encoder_candidate} on {self.media_file.filename}")
+            logger.info(f"Starting/Resuming CRF search for encoder: {encoder_candidate} on {self.media_file.filename}")
             try:
-                self.encode_info_handler.dump(encoder=encoder_candidate, crf=0, # Mark current search, crf=0 means "in progress for this encoder"
-                                              pre_encoder_data=self.encode_info_handler.pre_encoder_data) # Keep existing pre_encoder_data
-
+                self.encode_info_handler.dump(encoder=encoder_candidate, crf=0,
+                                              pre_encoder_data=self.encode_info_handler.pre_encoder_data)
                 crf_val, encoded_ratio_val = self._perform_crf_search_for_encoder(
                     encoder_candidate
                 )
                 encoded_ratio_float = encoded_ratio_val / 100.0
-                logger.debug(f"CRF search for {encoder_candidate} successful: CRF {crf_val}, Ratio {encoded_ratio_float:.2%}")
+                logger.info(f"CRF search for {encoder_candidate} successful: CRF {crf_val}, Ratio {encoded_ratio_float:.2%}")
+                all_searches_failed_flag = False # At least one search was successful
 
                 if (
                     current_best_ratio_found is None
@@ -444,17 +418,12 @@ class PreVideoEncoder(PreEncoder):
                     self.best_encoder = encoder_candidate
                     self.best_crf = crf_val
                     self.best_ratio = encoded_ratio_float
-                    # Persist the best found *so far* (encoder and its CRF)
-                    # This is important if the overall search across multiple encoders is interrupted.
-                    # The status remains CRF_SEARCH_STARTED.
                     self.encode_info_handler.dump(encoder=self.best_encoder, crf=self.best_crf,
-                                                  pre_encoder_data=self.encode_info_handler.pre_encoder_data) # Store the CRF for this best encoder
-
+                                                  pre_encoder_data=self.encode_info_handler.pre_encoder_data)
             except CRFSearchFailedException as e:
                 logger.warning(
                     f"CRF search failed for encoder {encoder_candidate} on {self.media_file.filename}: {e}. Trying next encoder if available."
                 )
-                # If this encoder failed, ensure its CRF is not mistakenly stored as a "best" by resetting its CRF in progress.
                 if self.encode_info_handler.encoder == encoder_candidate:
                      self.encode_info_handler.dump(crf=0, pre_encoder_data=self.encode_info_handler.pre_encoder_data)
                 continue
@@ -469,18 +438,25 @@ class PreVideoEncoder(PreEncoder):
 
         self.crf_checking_time = datetime.now() - crf_search_start_time
 
-        if not self.best_encoder or self.best_crf == 0:
-            final_error_msg = f"CRF search did not find a suitable encoder/CRF for {self.media_file.filename} after trying all candidates."
-            logger.debug(final_error_msg)
-            raise CRFSearchFailedException(final_error_msg)
+        if all_searches_failed_flag or not self.best_encoder or self.best_crf == 0:
+            logger.warning(
+                f"CRF search failed for all configured encoders for {self.media_file.filename}. "
+                f"Falling back to manual CRF mode (Encoder: {AVAILABLE_ENCODERS[0] if AVAILABLE_ENCODERS else AV1_ENCODER}, CRF: {MANUAL_CRF})."
+            )
+            self.is_manual_mode = True # Switch to manual mode
+            self.best_crf = MANUAL_CRF
+            self.best_encoder = AVAILABLE_ENCODERS[0] if AVAILABLE_ENCODERS else AV1_ENCODER
+            self.best_ratio = None
+            self.crf_checking_time = timedelta(0) # No real search time for fallback
+            # Update EncodeInfo to reflect this fallback to manual
+            # The final pre_encoder_data with is_manual_mode=True will be set by self.start()
         else:
             ratio_log_str = (
                 f"{self.best_ratio:.2%}" if self.best_ratio is not None else "N/A"
             )
-            logger.debug(
+            logger.info(
                 f"Optimal pre-encode params determined for {self.media_file.filename}: Encoder {self.best_encoder}, CRF {self.best_crf}, Ratio {ratio_log_str}. Time: {format_timedelta(self.crf_checking_time)}"
             )
-
 
     def _perform_crf_search_for_encoder(self, encoder_to_test: str) -> Tuple[int, int]:
         if (
@@ -557,7 +533,7 @@ class PreVideoEncoder(PreEncoder):
 
         if crf_match and encoded_ratio_percent is not None:
             crf = int(crf_match.group(1))
-            logger.debug(
+            logger.info(
                 f"CRF search for {encoder_to_test} on {self.media_file.filename} resulted in: CRF {crf}, Ratio {encoded_ratio_percent}%"
             )
             if (

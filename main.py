@@ -74,7 +74,7 @@ def main():
         standard_pipeline = StandardVideoPipeline(project_path, args=args)
         standard_pipeline.run()
 
-    logger.info("Smart Encoder process finished.")
+    logger.success("Smart Encoder process finished.")
 
 
 if __name__ == "__main__":
