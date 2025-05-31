@@ -5,7 +5,9 @@ from datetime import datetime, timedelta
 from fractions import Fraction
 from pathlib import Path
 from pprint import pformat
-from typing import Optional, Any # Added Any
+from typing import Optional, Any, List # List を追加
+import shlex # shlex をインポート
+import subprocess # subprocess をインポート
 
 import yaml
 from loguru import logger
@@ -17,17 +19,16 @@ from ..utils.ffmpeg_utils import run_cmd
 # Domain
 from ..domain.media import MediaFile
 from ..domain.exceptions import (
-    SkippedFileException, # Though PreEncoder primarily raises this
+    SkippedFileException,
     MP4MKVEncodeFailException,
     EncodingException,
-    PreprocessingException, # For PreEncoder interaction
-    # FormatExcludedException, NoAudioStreamException, (Handled by PreEncoder)
+    PreprocessingException,
 )
 from ..domain.temp_models import EncodeInfo
 
 # Services
 from .logging_service import ErrorLog, SuccessLog
-from .preprocessing_service import PreVideoEncoder, PreEncoder # PreEncoder for type hint
+from .preprocessing_service import PreVideoEncoder, PreEncoder
 
 # Config
 from ..config.audio import (
@@ -60,53 +61,46 @@ from ..config.video import (
     ENCODERS as VIDEO_ENCODERS_CONFIG,
     MANUAL_CRF_INCREMENT_PERCENT,
     MAX_CRF,
+    MANUAL_CRF
 )
 
 
 class Encoder:
-    pre_encoder: Optional[PreEncoder] = None # More generic type hint
+    pre_encoder: Optional[PreEncoder] = None
     encode_start_datetime: datetime
     encode_end_datetime: datetime
     encode_time: timedelta
-    total_time: timedelta # Includes pre-encoding time
-    encoder_codec_name: str # Set by subclass or pre-encoder
-    crf: Optional[int] = None # Set by subclass or pre-encoder
-    encoded_dir: Path # Must be set by subclass __init__
-    encoded_root_dir: Path # Usually same as encoded_dir or its parent, for context
-    encoded_file: Path # Actual output file, must be set by subclass __init__ or encode()
+    total_time: timedelta
+    encoder_codec_name: str
+    crf: Optional[int] = None
+    encoded_dir: Path
+    encoded_root_dir: Path
+    encoded_file: Path
     encoded_size: int
-    renamed_original_file: Optional[Path] = None # If pre-encoder skipped/moved
+    renamed_original_file: Optional[Path] = None
     success_log: Optional[SuccessLog] = None
-    encode_info: EncodeInfo # Progress tracking object
+    encode_info: EncodeInfo
+    # encode_cmd_str をリストに変更
+    encode_cmd_list: List[str] = []
 
-    def __init__(self, media_file: MediaFile, args: Any): # Use Any for args
+
+    def __init__(self, media_file: MediaFile, args: Any):
         self.original_media_file = media_file
         self.args = args
-        self.no_error = True # Internal flag for current ffmpeg op, not overall job status
+        self.no_error = True
 
         self.error_dir_base = BASE_ERROR_DIR.resolve()
-        self.current_error_output_path: Optional[Path] = None # If original moved to error dir
+        self.current_error_output_path: Optional[Path] = None
 
-        self.success_log_dir_base = Path.cwd() # Default, can be overridden by subclass
+        self.success_log_dir_base = Path.cwd()
         self.encoded_comment_text = ""
-        self.encode_cmd_str = "" # Current ffmpeg command
-        self.encoded_raw_files_target_dir: Optional[Path] = None # Set by subclass
+        self.encode_cmd_list = [] # 初期化
+        self.encoded_raw_files_target_dir: Optional[Path] = None
 
         self.keep_mtime = args.keep_mtime if hasattr(args, "keep_mtime") else False
 
-        # Initialize or get EncodeInfo instance
-        # Subclasses (like VideoEncoder) that use PreEncoder will get it from there.
-        # Others (AudioEncoder, PhoneVideoEncoder) will initialize it here.
-        # This logic is a bit complex here, ideally EncodeInfo is always passed or consistently retrieved.
-        # For now, relying on subclasses to ensure self.encode_info is set.
-        # If pre_encoder is used (e.g. VideoEncoder), it will set self.encode_info in its __init__
-        # otherwise, it needs to be set here.
-        # This will be set by subclasses after super().__init__()
-        # self.encode_info = ...
-
 
     def start(self):
-        # Ensure encode_info is initialized by the subclass or a pre_encoder
         if not hasattr(self, 'encode_info') or not self.encode_info:
             logger.warning(f"EncodeInfo not set for {self.original_media_file.filename} before Encoder.start(). Initializing a default one.")
             default_storage_dir = Path.cwd() / ".smart_encoder_cache" / self.original_media_file.md5[:2]
@@ -115,23 +109,19 @@ class Encoder:
             if not self.encode_info.load():
                 self.encode_info.dump(status=JOB_STATUS_PENDING, ori_video_path=str(self.original_media_file.path))
 
+        logger.debug(f"Encoder.start() for {self.original_media_file.path.name}, original_media_file.path = '{self.original_media_file.path}' (Status: {self.encode_info.status})")
 
-        logger.info(
-            f"Starting processing for: {self.original_media_file.path.relative_to(Path.cwd())} (Status: {self.encode_info.status})"
-        )
-        if not hasattr(self, "encoded_dir") or not self.encoded_dir: # Should be set by subclass
+        if not hasattr(self, "encoded_dir") or not self.encoded_dir:
             logger.error(f"encoded_dir not set for {self.original_media_file.filename} before start() call.")
             self.encode_info.dump(status=JOB_STATUS_ERROR_PERMANENT, last_error_message="Internal error: encoded_dir not set.")
-            self.no_error = False # Ensure post_actions knows about the error
+            self.no_error = False
             self.post_actions()
             return
         self.encoded_dir.mkdir(parents=True, exist_ok=True)
 
-
-        # --- Check overall job status from EncodeInfo ---
         if self.encode_info.status == JOB_STATUS_COMPLETED:
             logger.info(f"File {self.original_media_file.filename} already completed. Finalizing.")
-            self.no_error = True # Overall job is success
+            self.no_error = True
             if self.encode_info.temp_output_path:
                 self.encoded_file = Path(self.encode_info.temp_output_path)
                 if self.encoded_file.exists():
@@ -139,7 +129,6 @@ class Encoder:
             if not hasattr(self, 'encode_time'): self.encode_time = timedelta(0)
             if not hasattr(self, 'total_time'): self.total_time = timedelta(0)
             if not hasattr(self, 'encode_end_datetime'): self.encode_end_datetime = datetime.fromisoformat(self.encode_info.last_updated) if self.encode_info.last_updated else datetime.now()
-
             self.write_success_log()
             self.post_actions()
             return
@@ -158,17 +147,13 @@ class Encoder:
             self.post_actions()
             return
 
-        # --- Pre-encoder execution (if applicable, e.g., VideoEncoder) ---
         if self.pre_encoder:
             try:
-                # PreEncoder.start() should be called if pre-processing is not yet done.
-                # It will handle its own status updates within EncodeInfo.
                 if self.encode_info.status not in [JOB_STATUS_PREPROCESSING_DONE, JOB_STATUS_ENCODING_FFMPEG_STARTED]:
                     logger.debug(f"Pre-encoder required for {self.original_media_file.filename}, current status: {self.encode_info.status}. Running pre_encoder.start().")
-                    self.pre_encoder.start() # Can raise SkippedFileException, PreprocessingException
+                    self.pre_encoder.start()
                 else:
                     logger.debug(f"Pre-encoder stage already completed or bypassed for {self.original_media_file.filename} (status: {self.encode_info.status}). Loading results for encoding.")
-                    # Ensure PreEncoder attributes are populated if its start() was skipped
                     if self.encode_info.status == JOB_STATUS_PREPROCESSING_DONE or self.encode_info.status == JOB_STATUS_ENCODING_FFMPEG_STARTED:
                         if self.encode_info.pre_encoder_data:
                             self.pre_encoder.best_encoder = self.encode_info.encoder or self.encode_info.pre_encoder_data.get("best_encoder", "")
@@ -181,8 +166,8 @@ class Encoder:
                             time_sec = self.encode_info.pre_encoder_data.get("crf_checking_time_seconds")
                             if time_sec is not None:
                                 self.pre_encoder.crf_checking_time = timedelta(seconds=time_sec)
-                        else:
-                            logger.warning(f"Status is {self.encode_info.status} but no pre_encoder_data found in EncodeInfo for {self.original_media_file.filename}. Encoding may fail.")
+                        else: # This case should ideally not be hit if status implies pre_encoder_data should exist
+                            logger.warning(f"Status is {self.encode_info.status} but no pre_encoder_data found in EncodeInfo for {self.original_media_file.filename}. Pre-encoder dependent steps might fail.")
 
 
                 if self.pre_encoder.renamed_file_on_skip_or_error and \
@@ -193,9 +178,14 @@ class Encoder:
                     self.post_actions()
                     return
 
+                # Ensure encoder_codec_name and crf are set from EncodeInfo if pre-processing is done.
                 if self.encode_info.status == JOB_STATUS_PREPROCESSING_DONE:
                     self.encoder_codec_name = self.encode_info.encoder
                     self.crf = self.encode_info.crf
+                elif self.encode_info.status == JOB_STATUS_ENCODING_FFMPEG_STARTED: # Resuming ffmpeg
+                    self.encoder_codec_name = self.encode_info.encoder
+                    self.crf = self.encode_info.crf
+
 
             except SkippedFileException as e:
                 logger.info(f"Skipped by pre-encoder: {self.original_media_file.filename} - {e}")
@@ -250,7 +240,7 @@ class Encoder:
 
         self.encode_start_datetime = datetime.now()
         logger.info(
-            f"Encoding: {self.original_media_file.path.relative_to(Path.cwd())}"
+            f"Encoding started for: {self.original_media_file.path.name}"
         )
         self.no_error = True
 
@@ -304,8 +294,16 @@ class Encoder:
         )
         error_file_dir.mkdir(parents=True, exist_ok=True)
         error_log = ErrorLog(error_file_dir)
+        # コマンドリストを文字列に変換してログに記録
+        cmd_str_for_log = " ".join(self.encode_cmd_list) if self.encode_cmd_list else "N/A"
+        try:
+            cmd_str_for_log = subprocess.list2cmdline(self.encode_cmd_list) if os.name == 'nt' and self.encode_cmd_list else " ".join(shlex.quote(s) for s in self.encode_cmd_list)
+        except Exception:
+            cmd_str_for_log = " ".join(map(str,self.encode_cmd_list))
+
+
         error_log.write(
-            f"Failed command: {self.encode_cmd_str}",
+            f"Failed command: {cmd_str_for_log}",
             f"Original file: {str(self.original_media_file.path)}",
             f"MD5: {self.original_media_file.md5}",
             f"Probe info (brief): Video streams: {len(self.original_media_file.video_streams)}, Audio: {len(self.original_media_file.audio_streams)}",
@@ -317,7 +315,7 @@ class Encoder:
             self.encode_info.dump(status=JOB_STATUS_ERROR_RETRYABLE,
                                   last_error_message=error_message_short,
                                   increment_retry_count=True)
-            logger.info(f"Marked {self.original_media_file.filename} as retryable. Retry {self.encode_info.retry_count}/{MAX_ENCODE_RETRIES}.")
+            logger.warning(f"Marked {self.original_media_file.filename} as retryable. Retry {self.encode_info.retry_count}/{MAX_ENCODE_RETRIES}.")
         else:
             final_error_reason = error_message_short
             if not is_retryable_error:
@@ -358,7 +356,7 @@ class Encoder:
         if hasattr(self, "encoded_file") and self.encoded_file and self.encoded_file.exists():
             try:
                 self.encoded_file.unlink(missing_ok=True)
-                logger.info(f"Deleted partially encoded file: {self.encoded_file}")
+                logger.debug(f"Deleted partially encoded file: {self.encoded_file}")
             except OSError as e:
                 logger.error(
                     f"Could not delete partially encoded file {self.encoded_file}: {e}"
@@ -460,7 +458,8 @@ class Encoder:
             return
 
         if not self.original_media_file.path.exists():
-            if self.renamed_original_file and self.renamed_original_file.parent.resolve() == self.encoded_raw_files_target_dir.resolve():
+            if self.renamed_original_file and self.renamed_original_file.is_file() and \
+               self.renamed_original_file.parent.resolve() == self.encoded_raw_files_target_dir.resolve():
                  logger.debug(f"Original file {self.original_media_file.filename} seems already in raw archive: {self.renamed_original_file}")
                  return
             logger.warning(
@@ -477,7 +476,26 @@ class Encoder:
             logger.debug(f"Original file {self.original_media_file.filename} is already in the target raw directory. No move needed.")
             return
 
-        if not raw_file_target_path.exists():
+        if raw_file_target_path.exists():
+            try:
+                original_size = self.original_media_file.path.stat().st_size
+                existing_raw_size = raw_file_target_path.stat().st_size
+
+                if original_size > existing_raw_size:
+                    logger.info(f"Original file {self.original_media_file.filename} ({formatted_size(original_size)}) is larger than existing raw file {raw_file_target_path.name} ({formatted_size(existing_raw_size)}). Overwriting.")
+                    raw_file_target_path.unlink()
+                    shutil.move(str(self.original_media_file.path), str(raw_file_target_path))
+                    logger.debug(f"Overwrote raw archive with larger original file: {raw_file_target_path}")
+                    self.renamed_original_file = raw_file_target_path
+                else:
+                    logger.info(f"Original file {self.original_media_file.filename} ({formatted_size(original_size)}) is not larger than existing raw file {raw_file_target_path.name} ({formatted_size(existing_raw_size)}). Deleting original.")
+                    self.original_media_file.path.unlink()
+                    self.renamed_original_file = raw_file_target_path
+            except FileNotFoundError:
+                 logger.warning(f"File not found during size comparison or deletion in _move_original_raw_file for {self.original_media_file.filename}.")
+            except Exception as e:
+                logger.error(f"Error during raw file comparison/move for {self.original_media_file.filename}: {e}")
+        else:
             try:
                 shutil.move(
                     str(self.original_media_file.path), str(raw_file_target_path)
@@ -494,27 +512,18 @@ class Encoder:
                 logger.error(
                     f"Unexpected error moving {self.original_media_file.filename} to raw archive {raw_file_target_path}: {e}"
                 )
-        else:
-            logger.info(
-                f"Raw file {raw_file_target_path} already exists. Original {self.original_media_file.filename} not moved. Consider deleting original if identical."
-            )
 
 
     def post_actions(self):
         if self.encode_info.status == JOB_STATUS_COMPLETED:
-            # Remove EncodeInfo file on successful completion
             logger.debug(f"Encoding completed for {self.original_media_file.filename}. Removing progress file: {self.encode_info.path}")
             self.encode_info.remove_file()
-            # Then proceed with other post actions like moving raw file
         elif self.encode_info.status == JOB_STATUS_SKIPPED:
-            # Remove EncodeInfo for skipped files as well, as they don't need retry
             logger.debug(f"File {self.original_media_file.filename} was skipped. Removing progress file: {self.encode_info.path}")
             self.encode_info.remove_file()
         elif self.encode_info.status == JOB_STATUS_ERROR_PERMANENT:
-            # Optionally remove for permanent errors too, or keep for investigation
             logger.debug(f"File {self.original_media_file.filename} has permanent error. Removing progress file: {self.encode_info.path}")
             self.encode_info.remove_file()
-
 
         if self.renamed_original_file and self.renamed_original_file.exists() and \
            self.renamed_original_file.resolve() != self.original_media_file.path.resolve():
@@ -532,47 +541,39 @@ class Encoder:
         if self.encode_info.status == JOB_STATUS_COMPLETED:
             if self.args.move_raw_file:
                 self._move_original_raw_file()
-
-            final_encoded_file_path_str = self.encode_info.temp_output_path or (str(self.encoded_file) if hasattr(self, 'encoded_file') else "N/A")
+            final_encoded_file_path_str = self.encode_info.temp_output_path or (str(self.encoded_file) if hasattr(self, 'encoded_file') and self.encoded_file else "N/A")
             final_encoded_file = Path(final_encoded_file_path_str) if final_encoded_file_path_str != "N/A" else None
-
             final_encoded_size = 0
             if final_encoded_file and final_encoded_file.exists():
                 final_encoded_size = final_encoded_file.stat().st_size
             elif hasattr(self, 'encoded_size'):
                 final_encoded_size = self.encoded_size
-
             total_time_val = self.total_time if hasattr(self, 'total_time') else timedelta(0)
-
             size_ratio = (
                 (final_encoded_size / self.original_media_file.size * 100)
                 if self.original_media_file.size > 0 and final_encoded_size > 0
                 else 0
             )
             logger.success(
-                f"Completed: {self.original_media_file.path.relative_to(Path.cwd())}, "
-                f"total time: {format_timedelta(total_time_val)}, "
+                f"Completed: {self.original_media_file.path.name}, "
+                f"time: {format_timedelta(total_time_val)}, "
                 f"{formatted_size(self.original_media_file.size)} -> {formatted_size(final_encoded_size)} "
-                f"({size_ratio:.0f}%) Output: {final_encoded_file_path_str}"
+                f"({size_ratio:.0f}%) Output: {final_encoded_file.name if final_encoded_file else 'N/A'}"
             )
-
         elif self.encode_info.status == JOB_STATUS_ERROR_RETRYABLE:
             logger.warning(
-                f"Finished processing (with retryable error): {self.original_media_file.path.relative_to(Path.cwd())}. "
+                f"Finished {self.original_media_file.path.name} (retryable error). "
                 f"Retries: {self.encode_info.retry_count}/{MAX_ENCODE_RETRIES}. Error: {self.encode_info.last_error_message}"
             )
-
         elif self.encode_info.status == JOB_STATUS_ERROR_PERMANENT:
              logger.error(
-                f"Finished processing (with permanent error): {self.original_media_file.path.relative_to(Path.cwd())}. "
+                f"Finished {self.original_media_file.path.name} (permanent error). "
                 f"Error: {self.encode_info.last_error_message}"
             )
-
         else:
             logger.info(
-                f"Finished processing (status: {self.encode_info.status}): {self.original_media_file.path.relative_to(Path.cwd())}"
+                f"Finished {self.original_media_file.path.name} (status: {self.encode_info.status})"
             )
-
 
     def _set_metadata_comment(self):
         raise NotImplementedError("Subclasses must implement _set_metadata_comment().")
@@ -597,10 +598,6 @@ class VideoEncoder(Encoder):
 
 
     def encode(self):
-        # Ensure PreEncoder has run and its results are loaded if resuming
-        # This is now handled in Encoder.start() before _perform_encode -> encode() is called.
-        # self.pre_encoder attributes (like output_video_streams) should be populated.
-
         self.encoder_codec_name = self.encode_info.encoder
         self.crf = self.encode_info.crf
 
@@ -610,38 +607,31 @@ class VideoEncoder(Encoder):
             self.failed_action("", error_msg, -1, is_retryable_error=False)
             raise EncodingException(error_msg)
 
-        # Critical: Ensure self.pre_encoder has its stream attributes correctly populated.
-        # This should have been done by PreEncoder.start() or Encoder.start()'s loading logic.
         if not (self.pre_encoder.output_video_streams or self.pre_encoder.output_audio_streams or self.pre_encoder.output_subtitle_streams) and \
-           not (self.args and getattr(self.args, "allow_no_audio", False) and self.pre_encoder.output_video_streams): # Allow no audio if video exists
-            # This check might be too late if pre_encoder_data was missing or corrupt
-            # Re-check pre_encoder_data directly from encode_info if pre_encoder attributes are empty
+           not (self.args and getattr(self.args, "allow_no_audio", False) and self.pre_encoder.output_video_streams) :
             if self.encode_info.pre_encoder_data:
+                logger.debug(f"Restoring stream selections from pre_encoder_data for {self.original_media_file.filename} in VideoEncoder.encode.")
                 self.pre_encoder.output_video_streams = self.encode_info.pre_encoder_data.get("output_video_streams", [])
                 self.pre_encoder.output_audio_streams = self.encode_info.pre_encoder_data.get("output_audio_streams", [])
                 self.pre_encoder.output_subtitle_streams = self.encode_info.pre_encoder_data.get("output_subtitle_streams", [])
-                logger.debug("Restored stream selections from pre_encoder_data for building maps.")
                 if not (self.pre_encoder.output_video_streams or self.pre_encoder.output_audio_streams or self.pre_encoder.output_subtitle_streams) and \
                    not (self.args and getattr(self.args, "allow_no_audio", False) and self.pre_encoder.output_video_streams):
-                    error_msg = f"No processable streams selected by pre-encoder (or restored from cache) for {self.original_media_file.filename}."
+                    error_msg = f"No processable streams selected or restored for {self.original_media_file.filename}."
                     logger.error(error_msg)
-                    self.failed_action("", error_msg, -1, is_retryable_error=False) # Non-retryable config issue
+                    self.failed_action("", error_msg, -1, is_retryable_error=False)
                     raise EncodingException(error_msg)
-            else: # No pre_encoder_data either
-                error_msg = f"Pre-encoder data (including stream selections) is missing for {self.original_media_file.filename}."
+            else:
+                error_msg = f"Pre-encoder data (including stream selections) is missing for {self.original_media_file.filename}, and no streams on pre_encoder instance attributes."
                 logger.error(error_msg)
                 self.failed_action("", error_msg, -1, is_retryable_error=False)
                 raise EncodingException(error_msg)
-
 
         self.encoded_file = (self.encoded_dir / f"{self.original_media_file.path.stem}.mp4")
         try:
             self._ffmpeg_encode_video()
         except MP4MKVEncodeFailException as e:
-            logger.error(f"MP4/MKV encoding chain failed for {self.original_media_file.filename}: {e}")
             raise
         except EncodingException as e:
-            logger.error(f"ffmpeg_encode_video reported EncodingException for {self.original_media_file.filename}: {e}")
             raise
 
     def _check_and_handle_oversized(self, attempt=1, max_attempts=3) -> bool:
@@ -792,10 +782,17 @@ class VideoEncoder(Encoder):
     ):
         self._build_ffmpeg_stream_maps()
         self._set_metadata_comment(update_log_comment_dict)
-        self._build_encode_command()
+        self._build_encode_command() # This now sets self.encode_cmd_list
+
+        # Ensure ffmpeg_command in EncodeInfo is a string for logging/display
+        try:
+            cmd_str_for_info = subprocess.list2cmdline(self.encode_cmd_list) if os.name == 'nt' else " ".join(shlex.quote(s) for s in self.encode_cmd_list)
+        except Exception:
+             cmd_str_for_info = " ".join(map(str, self.encode_cmd_list))
+
 
         self.encode_info.dump(status=JOB_STATUS_ENCODING_FFMPEG_STARTED,
-                              ffmpeg_command=self.encode_cmd_str,
+                              ffmpeg_command=cmd_str_for_info,
                               temp_output_path=str(self.encoded_file),
                               encoder=self.encoder_codec_name,
                               crf=self.crf)
@@ -804,8 +801,8 @@ class VideoEncoder(Encoder):
         show_cmd_output = __debug__
         cmd_log_file_path_val = self.encoded_dir / COMMAND_TEXT
 
-        res = run_cmd(
-            cmd_str=self.encode_cmd_str,
+        res = run_cmd( # Pass the list
+            self.encode_cmd_list,
             src_file_for_log=self.original_media_file.path,
             error_log_dir_for_run_cmd=self.error_dir_base,
             show_cmd=show_cmd_output,
@@ -843,26 +840,31 @@ class VideoEncoder(Encoder):
         elif self.encoded_file.suffix.lower() == ".mp4" and not is_oversized_retry:
             logger.warning(
                 f"MP4 encoding failed for {self.original_media_file.path.name}. "
-                f"Return code: {res.returncode if res else 'N/A'}. Stderr: {res.stderr if res else 'N/A'}"
-                f" Retrying with .mkv container."
+                f"RC: {res.returncode if res else 'N/A'}. Retrying with .mkv."
             )
+            logger.debug(f"MP4 fail Stderr: {res.stderr if res else 'N/A'}")
             if self.encoded_file.exists():
                 self.encoded_file.unlink(missing_ok=True)
 
             self.encoded_file = self.encoded_file.with_suffix(".mkv")
             self._build_ffmpeg_stream_maps()
             self._set_metadata_comment(update_log_comment_dict)
-            self._build_encode_command()
+            self._build_encode_command() # Rebuilds self.encode_cmd_list
+
+            try:
+                cmd_str_for_info_mkv = subprocess.list2cmdline(self.encode_cmd_list) if os.name == 'nt' else " ".join(shlex.quote(s) for s in self.encode_cmd_list)
+            except Exception:
+                cmd_str_for_info_mkv = " ".join(map(str,self.encode_cmd_list))
 
             self.encode_info.dump(status=JOB_STATUS_ENCODING_FFMPEG_STARTED,
-                                  ffmpeg_command=self.encode_cmd_str,
+                                  ffmpeg_command=cmd_str_for_info_mkv,
                                   temp_output_path=str(self.encoded_file),
                                   last_error_message="MP4 failed, retrying MKV.")
 
 
-            logger.info(f"Retrying with MKV: {self.encode_cmd_str}")
-            res_mkv = run_cmd(
-                cmd_str=self.encode_cmd_str,
+            logger.info(f"Retrying with MKV: {self.encoded_file.name}")
+            res_mkv = run_cmd( # Pass list
+                self.encode_cmd_list,
                 src_file_for_log=self.original_media_file.path,
                 error_log_dir_for_run_cmd=self.error_dir_base,
                 show_cmd=show_cmd_output,
@@ -870,7 +872,7 @@ class VideoEncoder(Encoder):
             )
 
             if res_mkv and res_mkv.returncode == 0:
-                logger.info(f"MKV encoding successful for {self.encoded_file.name}.")
+                logger.debug(f"MKV encoding successful for {self.encoded_file.name}.")
                 self.no_error = True
                 if self.keep_mtime and self.encoded_file.exists():
                     try:
@@ -951,7 +953,7 @@ class VideoEncoder(Encoder):
                             fps_val = float(fps_fraction)
                             fps_str = f"{fps_val:.3f}".rstrip('0').rstrip('.') if fps_val % 1 != 0 else str(int(fps_val))
                 except (ZeroDivisionError, ValueError) as e:
-                    logger.error(
+                    logger.warning(
                         f"Error parsing avg_frame_rate '{video_stream.get('avg_frame_rate')}' for {self.original_media_file.filename}: {e}. Using default FPS {fps_str}."
                     )
             else:
@@ -968,7 +970,7 @@ class VideoEncoder(Encoder):
         audio_output_idx = 0
         audio_streams_to_map = self.pre_encoder.output_audio_streams
         if not audio_streams_to_map:
-            logger.warning(
+            logger.debug(
                 f"No output audio streams selected for {self.original_media_file.filename}. Output will have no audio."
             )
         for audio_stream in audio_streams_to_map:
@@ -996,7 +998,7 @@ class VideoEncoder(Encoder):
 
                 abitrate_cmd = f"-b:a:{audio_output_idx} {target_opus_bitrate} "
                 if not is_mkv_target:
-                    logger.debug(
+                    logger.info(
                         f"Audio stream {stream_index} ({input_codec_name}) will be re-encoded to Opus. "
                         f"Changing output container to MKV for compatibility from {self.encoded_file.name}."
                     )
@@ -1035,18 +1037,43 @@ class VideoEncoder(Encoder):
 
 
     def _build_encode_command(self):
-        self.encode_cmd_str = (
-            f'ffmpeg -y -i "{self.original_media_file.path.resolve()}" '
-            f'-c:v "{self.encoder_codec_name}" -crf {self.crf} '
-            f"{self.video_map_cmd_part} "
-            f'-metadata comment="{self.encoded_comment_text}" '
-            f"{self.audio_map_cmd_part if self.audio_map_cmd_part else ''} "
-            f"{self.subtitle_map_cmd_part if self.subtitle_map_cmd_part else ''} "
-            f'"{self.encoded_file.resolve()}"'
-        ).strip().replace("  ", " ")
+        input_path_str = str(self.original_media_file.path.resolve())
+        output_path_str = str(self.encoded_file.resolve())
+        logger.debug(f"Building encode command. Input path: '{input_path_str}', Output path: '{output_path_str}'")
 
+        cmd_list = ["ffmpeg", "-y", "-i", input_path_str]
+        cmd_list.extend(["-c:v", self.encoder_codec_name, "-crf", str(self.crf)])
+
+        if self.video_map_cmd_part: # Example: "-map 0:0 -r 23.976"
+            cmd_list.extend(shlex.split(self.video_map_cmd_part))
+
+        # Metadata comment needs careful handling if it contains spaces or special chars for shlex.split
+        # However, here it's a single argument for -metadata.
+        # f"comment={self.encoded_comment_text}" forms a single string like "comment=foo bar"
+        # If encoded_comment_text itself has spaces, ffmpeg expects "comment=foo bar" or 'comment=foo bar'
+        # or comment="foo bar".
+        # The safest is to pass "comment=..." as one argument if the comment value doesn't have tricky chars.
+        # Since self.encoded_comment_text is already YAML dumped and quote-escaped for ffmpeg's direct use,
+        # we pass it as `key=value` for -metadata.
+        cmd_list.extend(["-metadata", f"comment={self.encoded_comment_text}"])
+
+
+        if self.audio_map_cmd_part: # Example: "-map 0:1 -c:a:0 copy"
+            cmd_list.extend(shlex.split(self.audio_map_cmd_part))
+
+        if self.subtitle_map_cmd_part: # Example: "-map 0:2 -c:s:0 mov_text"
+            cmd_list.extend(shlex.split(self.subtitle_map_cmd_part))
+
+        cmd_list.append(output_path_str)
+
+        self.encode_cmd_list = cmd_list # Store as list
+
+        try:
+            display_cmd = subprocess.list2cmdline(cmd_list) if os.name == 'nt' else " ".join(shlex.quote(s) for s in cmd_list)
+        except AttributeError: # Python < 3.8
+            display_cmd = " ".join(shlex.quote(s) for s in cmd_list)
         logger.debug(
-            f"Built ffmpeg command for {self.original_media_file.filename}:\n{self.encode_cmd_str}"
+            f"Built ffmpeg command list for {self.original_media_file.filename}:\n{cmd_list}\nFormatted for display: {display_cmd}"
         )
 
 
@@ -1122,26 +1149,34 @@ class PhoneVideoEncoder(Encoder):
     def encode(self):
         self._set_metadata_comment()
         self.encoded_dir.mkdir(parents=True, exist_ok=True)
-        video_bitrate_str = f"{MANUAL_VIDEO_BIT_RATE_IPHONE_XR}"
-        audio_bitrate_str = f"{MANUAL_AUDIO_BIT_RATE_IPHONE_XR}"
-        self.encode_cmd_str = (
-            f'ffmpeg -y -i "{self.original_media_file.path.resolve()}" '
-            f"{self.cmd_options_phone} "
-            f"-c:v {self.encoder_codec_name} -b:v {video_bitrate_str}k "
-            f"-c:a {self.audio_encoder_codec_name} -b:a {audio_bitrate_str} "
-            f'-metadata comment="{self.encoded_comment_text}" '
-            f'"{self.encoded_file.resolve()}"'
-        ).strip()
-        logger.debug(f"PhoneVideoEncoder command: {self.encode_cmd_str}")
+        video_bitrate_str = f"{MANUAL_VIDEO_BIT_RATE_IPHONE_XR}k"
+        audio_bitrate_str = str(MANUAL_AUDIO_BIT_RATE_IPHONE_XR)
+
+        cmd_list = ["ffmpeg", "-y", "-i", str(self.original_media_file.path.resolve())]
+        # self.cmd_options_phone is a string like " -vf scale=-1:414 -r 20 ", split it
+        cmd_list.extend(shlex.split(self.cmd_options_phone))
+        cmd_list.extend(["-c:v", self.encoder_codec_name, "-b:v", video_bitrate_str])
+        cmd_list.extend(["-c:a", self.audio_encoder_codec_name, "-b:a", audio_bitrate_str])
+        cmd_list.extend(["-metadata", f"comment={self.encoded_comment_text}"])
+        cmd_list.append(str(self.encoded_file.resolve()))
+
+        self.encode_cmd_list = cmd_list # Store as list
+        logger.debug(f"PhoneVideoEncoder command list: {self.encode_cmd_list}")
+
+        try:
+            cmd_str_for_info = subprocess.list2cmdline(cmd_list) if os.name == 'nt' else " ".join(shlex.quote(s) for s in cmd_list)
+        except Exception:
+            cmd_str_for_info = " ".join(map(str, cmd_list))
+
         self.encode_info.dump(status=JOB_STATUS_ENCODING_FFMPEG_STARTED,
-                              ffmpeg_command=self.encode_cmd_str,
+                              ffmpeg_command=cmd_str_for_info,
                               temp_output_path=str(self.encoded_file),
                               encoder=self.encoder_codec_name)
 
         show_cmd_output = __debug__
         cmd_log_file_path_val = self.encoded_dir / COMMAND_TEXT
         res = run_cmd(
-            cmd_str=self.encode_cmd_str,
+            self.encode_cmd_list, # Pass list
             src_file_for_log=self.original_media_file.path,
             error_log_dir_for_run_cmd=self.error_dir_base,
             show_cmd=show_cmd_output,
@@ -1231,24 +1266,30 @@ class AudioEncoder(Encoder):
     def encode(self):
         self._set_metadata_comment()
         self.encoded_dir.mkdir(parents=True, exist_ok=True)
-        self.encode_cmd_str = (
-            f'ffmpeg -y -i "{self.original_media_file.path.resolve()}" '
-            f"-vn -map 0:a "
-            f"-c:a {self.encoder_codec_name} "
-            f"-b:a {self.target_bit_rate} "
-            f'-metadata comment="{self.encoded_comment_text}" '
-            f'"{self.encoded_file.resolve()}"'
-        ).strip()
-        logger.debug(f"AudioEncoder command: {self.encode_cmd_str}")
+
+        cmd_list = ["ffmpeg", "-y", "-i", str(self.original_media_file.path.resolve())]
+        cmd_list.extend(["-vn", "-map", "0:a"])
+        cmd_list.extend(["-c:a", self.encoder_codec_name, "-b:a", str(self.target_bit_rate)])
+        cmd_list.extend(["-metadata", f"comment={self.encoded_comment_text}"])
+        cmd_list.append(str(self.encoded_file.resolve()))
+
+        self.encode_cmd_list = cmd_list # Store as list
+        logger.debug(f"AudioEncoder command list: {self.encode_cmd_list}")
+
+        try:
+            cmd_str_for_info = subprocess.list2cmdline(cmd_list) if os.name == 'nt' else " ".join(shlex.quote(s) for s in cmd_list)
+        except Exception:
+            cmd_str_for_info = " ".join(map(str, cmd_list))
+
         self.encode_info.dump(status=JOB_STATUS_ENCODING_FFMPEG_STARTED,
-                              ffmpeg_command=self.encode_cmd_str,
+                              ffmpeg_command=cmd_str_for_info,
                               temp_output_path=str(self.encoded_file),
                               encoder=self.encoder_codec_name)
 
         show_cmd_output = __debug__
         cmd_log_file_path_val = self.encoded_dir / COMMAND_TEXT
         res = run_cmd(
-            cmd_str=self.encode_cmd_str,
+            self.encode_cmd_list, # Pass list
             src_file_for_log=self.original_media_file.path,
             error_log_dir_for_run_cmd=self.error_dir_base,
             show_cmd=show_cmd_output,
