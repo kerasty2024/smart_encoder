@@ -81,10 +81,16 @@ AUDIO_OPUS_CODECS = (
 
 SUBTITLE_MKV_CODECS = (
     "pgs",
-    "ass",
-    "vobsub",
-    "dvd_subtitle",
-    "subrip",
+    "ass", # Advanced SubStation Alpha
+    "ssa", # SubStation Alpha
+    "vobsub", # DVD bitmap subtitles
+    "dvd_subtitle", # Another name for VobSub
+    "subrip", # SRT
+    "srt",    # Common name for SubRip
+    "hdmv_pgs_subtitle", # Blu-ray bitmap subtitles (修正箇所)
+    "mov_text", # For completeness, if MKV happens to contain it
+    "tx3g",     # For completeness
+    "webvtt",   # WebVTT subtitles
 )  # Subtitles to output in MKV
 
 # Encoder Types
