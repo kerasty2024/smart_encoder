@@ -8,7 +8,8 @@ import ffmpeg
 from loguru import logger
 
 # Assuming exceptions.py is in the same package (src.domain)
-from .exceptions import NoDurationFoundException
+# 修正点: MediaFileException をインポートに追加
+from .exceptions import NoDurationFoundException, MediaFileException
 
 # Assuming common.py is in src.config
 from ..config.common import LOAD_FAILED_LOG, LOAD_FAILED_DIR
