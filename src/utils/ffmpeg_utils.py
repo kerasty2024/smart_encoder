@@ -137,9 +137,9 @@ def detect_audio_language_single(
     start_time_seconds: int,
     segment_duration_seconds: int,
     temp_work_dir_override: Optional[Path] = None,
-    whisper_model_size: str = "large-v3",
+    whisper_model_size: str = "medium",
     whisper_device: str = "cuda",
-    whisper_compute_type: str = "float16",
+    whisper_compute_type: str = "float32",
 ) -> str:
     default_language_code = LANGUAGE_WORDS[0] if LANGUAGE_WORDS else "und"
     stream_index = audio_stream_info.get("index")
