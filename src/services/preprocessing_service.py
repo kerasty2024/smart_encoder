@@ -780,7 +780,7 @@ class PreVideoEncoder(PreEncoder):
             lang_tag = stream.get("tags", {}).get("language", "").lower().strip()
             if lang_tag and lang_tag in LANGUAGE_WORDS:
                 suitable_subtitle_streams.append(stream)
-            elif not lang_tag or lang_tag == "und": # 字幕の場合、言語不明は通常不要
+            elif not lang_tag: # 字幕の場合、言語不明は通常不要
                 logger.debug(f"Subtitle stream index {stream.get('index')} for {self.media_file.filename} has undetermined or no language tag. Skipping.")
         self.output_subtitle_streams = suitable_subtitle_streams
         logger.debug(f"Selected {len(self.output_subtitle_streams)} subtitle streams for {self.media_file.filename}.")
