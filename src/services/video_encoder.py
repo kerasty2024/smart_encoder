@@ -121,7 +121,7 @@ class VideoEncoder(Encoder):
         except EncodingException as e:
             raise
 
-    def _check_and_handle_oversized(self, attempt=1, max_attempts=9) -> bool:
+    def _check_and_handle_oversized(self, attempt=1) -> bool:
         if not self.encoded_file.exists():
             logger.error(
                 f"_check_and_handle_oversized: Encoded file {self.encoded_file} does not exist."
@@ -143,7 +143,6 @@ class VideoEncoder(Encoder):
             )
             self.encoded_file.unlink(missing_ok=True)
 
-            # --- ▼▼▼ CRF LIMIT HANDLING MODIFIED ▼▼▼ ---
             # If the previous attempt was already at the max CRF, it's a permanent failure.
             if self.crf == ABSOLUTE_MAX_CRF:
                 error_msg = f"Final attempt with max CRF ({ABSOLUTE_MAX_CRF}) still resulted in an oversized file. Cannot reduce size further."
@@ -156,37 +155,22 @@ class VideoEncoder(Encoder):
                     crf=self.crf,
                 )
                 return False
-            # --- ▲▲▲ CRF LIMIT HANDLING MODIFIED ▲▲▲ ---
 
-            if attempt >= max_attempts:
-                error_msg = f"Max attempts ({max_attempts}) reached for oversized file {self.original_media_file.filename}. Cannot reduce size further with CRF."
-                logger.error(error_msg)
-                self.no_error = False
-                self.move_to_oversized_error_dir()
-                self.encode_info.dump(
-                    status=JOB_STATUS_ERROR_PERMANENT,
-                    last_error_message=error_msg,
-                    crf=self.crf,
-                )
-                return False
-
+            # --- ▼▼▼ CRF INCREMENT LOGIC MODIFIED ▼▼▼ ---
             oversize_ratio = current_encoded_size / self.original_media_file.size
-            try:
-                crf_increment = int(round(3 + (oversize_ratio - 1) * 10))
-            except ValueError:
-                crf_increment = 3
+            crf_increment = int(round(3 + (oversize_ratio - 1) * 10))
+            # Ensure the increment is at least 3
             crf_increment = max(3, crf_increment)
             new_crf = (self.crf or MANUAL_CRF) + crf_increment
 
-            # --- ▼▼▼ CRF CAPPING LOGIC MODIFIED ▼▼▼ ---
-            # Cap the new CRF if it exceeds the limit, for one final attempt.
+            # Cap the new CRF if it exceeds the limit, for a final attempt.
             if new_crf > ABSOLUTE_MAX_CRF:
                 logger.warning(
                     f"Calculated CRF ({new_crf}) exceeds the limit. "
                     f"Capping at {ABSOLUTE_MAX_CRF} for a final attempt."
                 )
                 new_crf = ABSOLUTE_MAX_CRF
-            # --- ▲▲▲ CRF CAPPING LOGIC MODIFIED ▲▲▲ ---
+            # --- ▲▲▲ CRF INCREMENT LOGIC MODIFIED ▲▲▲ ---
 
             self.crf = new_crf
             logger.info(
@@ -210,9 +194,8 @@ class VideoEncoder(Encoder):
                     is_oversized_retry=True,
                 )
                 if self.no_error:
-                    return self._check_and_handle_oversized(
-                        attempt=attempt + 1, max_attempts=max_attempts
-                    )
+                    # Recursive call without max_attempts
+                    return self._check_and_handle_oversized(attempt=attempt + 1)
                 else:
                     logger.error(
                         f"Re-encoding attempt {attempt+1} for oversized file failed (ffmpeg error). Error handled by failed_action."
