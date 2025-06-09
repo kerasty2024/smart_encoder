@@ -121,7 +121,7 @@ class VideoEncoder(Encoder):
         except EncodingException as e:
             raise
 
-    def _check_and_handle_oversized(self, attempt=1, max_attempts=3) -> bool:
+    def _check_and_handle_oversized(self, attempt=1, max_attempts=9) -> bool:
         if not self.encoded_file.exists():
             logger.error(
                 f"_check_and_handle_oversized: Encoded file {self.encoded_file} does not exist."
@@ -172,7 +172,7 @@ class VideoEncoder(Encoder):
 
             oversize_ratio = current_encoded_size / self.original_media_file.size
             try:
-                crf_increment = int(round(3 + 15 * ((oversize_ratio - 1) ** 1.5)))
+                crf_increment = int(round(3 + (oversize_ratio - 1) * 10))
             except ValueError:
                 crf_increment = 3
             crf_increment = max(3, crf_increment)
