@@ -4,9 +4,9 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from pprint import pformat
 from typing import Optional, List, Dict, Tuple, Type, Any
-import shlex # 追加
-import os # 追加
-import subprocess # 追加
+import shlex
+import os
+import subprocess
 
 from loguru import logger
 
@@ -424,7 +424,7 @@ class PreVideoEncoder(PreEncoder):
                     self.best_ratio = encoded_ratio_float
                     self.encode_info_handler.dump(encoder=self.best_encoder, crf=self.best_crf,
                                                   pre_encoder_data=self.encode_info_handler.pre_encoder_data)
-            except CRFSearchFailedException as e: # This exception is now only for actual ab-av1 tool failures or parsing issues
+            except CRFSearchFailedException as e:
                 logger.warning(
                     f"CRF search failed for encoder {encoder_candidate} on {self.media_file.filename}: {e}. Trying next encoder if available."
                 )
@@ -452,8 +452,6 @@ class PreVideoEncoder(PreEncoder):
             self.best_encoder = AVAILABLE_ENCODERS[0] if AVAILABLE_ENCODERS else AV1_ENCODER
             self.best_ratio = None
             self.crf_checking_time = timedelta(0)
-            # No need to raise CRFSearchFailedException here anymore.
-            # The fallback to manual mode is now the resolution.
         else:
             ratio_log_str = (
                 f"{self.best_ratio:.2%}" if self.best_ratio is not None else "N/A"
@@ -497,7 +495,6 @@ class PreVideoEncoder(PreEncoder):
         if temp_dir_for_ab_av1:
             cmd_list.extend(["--temp-dir", temp_dir_for_ab_av1])
 
-        # For logging the command as a string
         try:
             display_cmd = subprocess.list2cmdline(cmd_list) if os.name == 'nt' else " ".join(shlex.quote(s) for s in cmd_list)
         except AttributeError:
@@ -507,9 +504,9 @@ class PreVideoEncoder(PreEncoder):
         )
 
         res = run_cmd(
-            cmd_list, # Pass list to run_cmd
+            cmd_list,
             src_file_for_log=self.media_file.path,
-            show_cmd=__debug__, # run_cmd will handle showing based on this
+            show_cmd=__debug__,
         )
 
         if res is None or res.returncode != 0:
@@ -521,7 +518,6 @@ class PreVideoEncoder(PreEncoder):
             crf_check_error_dir = (
                 self.error_dir_base / "crf_check_errors" / self.media_file.relative_dir
             )
-            # Only create error dir and log if the command actually failed
             if not crf_check_error_dir.exists():
                  crf_check_error_dir.mkdir(parents=True, exist_ok=True)
 
@@ -554,7 +550,7 @@ class PreVideoEncoder(PreEncoder):
             if (
                 crf <= 0
                 or encoded_ratio_percent <= 0
-                or encoded_ratio_percent > MAX_ENCODED_PERCENT + 15
+                or encoded_ratio_percent > MAX_ENCODED_PERCENT + 15 # Allow some margin for ab-av1's max-encoded-percent behavior
             ):
                 raise CRFSearchFailedException(
                     f"CRF search for {encoder_to_test} yielded potentially invalid results: CRF {crf}, Ratio {encoded_ratio_percent}%"
@@ -562,7 +558,7 @@ class PreVideoEncoder(PreEncoder):
             return crf, encoded_ratio_percent
         else:
             err_msg = f"Could not parse CRF and/or Ratio from ab-av1 output for {encoder_to_test}. Output: {res.stdout}"
-            logger.error(err_msg) # This is an unexpected parsing error
+            logger.error(err_msg)
             crf_check_error_dir = (
                 self.error_dir_base / "crf_check_errors" / self.media_file.relative_dir
             )
@@ -586,61 +582,114 @@ class PreVideoEncoder(PreEncoder):
             self.output_video_streams = []
             return
 
-        if len(self.media_file.video_streams) == 1:
-            stream = self.media_file.video_streams[0]
-            if (
-                stream.get("avg_frame_rate") and stream.get("avg_frame_rate") != "0/0"
-                and stream.get("codec_name","").lower() not in SKIP_VIDEO_CODEC_NAMES
-            ):
-                self.output_video_streams = [stream]
-            else:
-                logger.warning(
-                    f"Single video stream in {self.media_file.filename} is unsuitable (no valid fps or excluded codec). No video output."
-                )
-                self.output_video_streams = []
-            return
-
-        suitable_video_streams = []
+        # 異常なフレームレートを持つビデオストリームをフィルタリングする可能性を考慮
+        # 例: 1000 FPSを超えるものは異常とみなすなど
+        # ただし、現状のMediaInfoでは 1499 FPS となっているので、このフィルタが有効かは不明
+        # ひとまずは現状のロジックを維持し、MediaFile側でより正確なフレームレートが取得できる前提とする
+        valid_video_streams = []
         for stream in self.media_file.video_streams:
-            codec_name = stream.get("codec_name", "").lower()
-            if (
-                stream.get("avg_frame_rate") and stream.get("avg_frame_rate") != "0/0"
-                and codec_name not in SKIP_VIDEO_CODEC_NAMES
-            ):
-                suitable_video_streams.append(stream)
-            else:
-                logger.debug(
-                    f"Skipping video stream index {stream.get('index')} for {self.media_file.filename} due to missing/invalid fps or excluded codec ({codec_name})."
-                )
+            is_valid_fps = False
+            avg_fps_str = stream.get("avg_frame_rate", "0/0")
+            if avg_fps_str != "0/0":
+                try:
+                    num, den = map(int, avg_fps_str.split('/'))
+                    if den != 0:
+                        fps_val = num / den
+                        # 一般的なビデオフレームレートの範囲に収まっているかチェック (例: 1 FPS以上, 121 FPS未満)
+                        # 今回の 1499 FPS はこの範囲外になる
+                        if 1 <= fps_val < 121: # この上限は調整可能
+                            is_valid_fps = True
+                        else:
+                            logger.warning(f"Video stream index {stream.get('index')} for {self.media_file.filename} has unusual frame rate: {fps_val} FPS. Will be excluded if other suitable streams exist.")
+                except ValueError:
+                    logger.warning(f"Could not parse avg_frame_rate '{avg_fps_str}' for video stream index {stream.get('index')} in {self.media_file.filename}.")
 
-        if not suitable_video_streams:
-            logger.warning(
-                f"No suitable video streams found after filtering for {self.media_file.filename}."
-            )
-        self.output_video_streams = suitable_video_streams
+            codec_name = stream.get("codec_name", "").lower()
+            if is_valid_fps and codec_name not in SKIP_VIDEO_CODEC_NAMES:
+                valid_video_streams.append(stream)
+            elif not is_valid_fps and codec_name not in SKIP_VIDEO_CODEC_NAMES :
+                # FPSが異常でも、他にストリームがない場合は選択肢として残すかもしれないが、
+                # 通常はエンコードエラーの原因になるため、除外する方が安全
+                logger.debug(f"Skipping video stream index {stream.get('index')} for {self.media_file.filename} due to invalid/unusual FPS or excluded codec ({codec_name}).")
+
+
+        if not valid_video_streams and self.media_file.video_streams:
+            # 有効なFPSのストリームが一つもなかったが、元々はビデオストリームがあった場合
+            # 最も可能性の高そうなものを一つ選ぶか、エラーとするか
+            # ここでは、元々あったビデオストリームから最初のものを選択する（ただし警告を出す）
+            logger.warning(f"No video streams with typical FPS found for {self.media_file.filename}. "
+                           f"Attempting to use the first video stream found (index {self.media_file.video_streams[0].get('index')}), "
+                           f"but it may have issues (e.g., reported FPS: {self.media_file.video_streams[0].get('avg_frame_rate')}).")
+            first_stream = self.media_file.video_streams[0]
+            if first_stream.get("codec_name","").lower() not in SKIP_VIDEO_CODEC_NAMES:
+                 self.output_video_streams = [first_stream]
+            else:
+                 self.output_video_streams = []
+        elif valid_video_streams:
+            # 複数の有効なビデオストリームがある場合、最初のものを選択 (または他の基準で選択)
+            self.output_video_streams = [valid_video_streams[0]]
+            if len(valid_video_streams) > 1:
+                logger.info(f"Multiple suitable video streams found for {self.media_file.filename}. Selected stream index {valid_video_streams[0].get('index')}.")
+        else:
+            self.output_video_streams = []
+
+
+        if not self.output_video_streams:
+             logger.warning(f"No suitable video streams selected for {self.media_file.filename}.")
+
 
     def _select_output_audio_streams(self):
         if not self.media_file.audio_streams:
-            raise NoAudioStreamException(
-                f"No audio streams at all in {self.media_file.filename}."
-            )
+            # --allow-no-audio フラグが立っていなければ NoAudioStreamException を発生させる
+            if not (self.args and getattr(self.args, "allow_no_audio", False)):
+                raise NoAudioStreamException(
+                    f"No audio streams at all in {self.media_file.filename}."
+                )
+            else: # allow_no_audio が True の場合は、オーディオストリームなしで処理を続行
+                logger.warning(f"No audio streams found in {self.media_file.filename}, but --allow-no-audio is set. Proceeding without audio.")
+                self.output_audio_streams = []
+                return
 
+        # オーディオストリームが1つしかない場合は、言語検出をスキップし、それを選択する
         if len(self.media_file.audio_streams) == 1:
             stream = self.media_file.audio_streams[0]
-            if self._is_audio_stream_language_suitable(stream):
-                self.output_audio_streams = [stream]
-            else:
-                raise NoAudioStreamException(
-                    f"Single audio stream in {self.media_file.filename} does not match desired languages or failed detection."
-                )
-            return
+            # 最低限のチェック（サンプルレートなど）は行っても良い
+            sample_rate_str = stream.get("sample_rate")
+            is_valid_sample_rate = False
+            if sample_rate_str:
+                try:
+                    sample_rate = int(float(sample_rate_str))
+                    if sample_rate >= 8000: # 一般的な最小サンプルレート
+                        is_valid_sample_rate = True
+                except ValueError:
+                    pass
 
+            if is_valid_sample_rate:
+                logger.debug(
+                    f"Only one audio stream found in {self.media_file.filename} (index {stream.get('index')}). "
+                    f"Skipping language detection and selecting this stream by default."
+                )
+                self.output_audio_streams = [stream]
+                return
+            else: # サンプルレートが無効など、明らかに不適切なストリームの場合
+                if not (self.args and getattr(self.args, "allow_no_audio", False)):
+                    raise NoAudioStreamException(
+                        f"Single audio stream in {self.media_file.filename} is unsuitable (e.g., invalid sample rate: {sample_rate_str})."
+                    )
+                else:
+                    logger.warning(f"Single audio stream in {self.media_file.filename} is unsuitable (e.g., invalid sample rate: {sample_rate_str}), "
+                                   f"but --allow-no-audio is set. Proceeding without audio.")
+                    self.output_audio_streams = []
+                    return
+
+
+        # 複数のオーディオストリームがある場合は、従来通り言語検出を行う
         suitable_audio_streams = []
         for stream in self.media_file.audio_streams:
             if "sample_rate" in stream:
                 try:
                     sample_rate = int(float(stream.get("sample_rate", 0)))
-                    if sample_rate < 1000:
+                    if sample_rate < 1000: # より現実的な下限値 (例: 8kHz未満はスキップ)
                         logger.debug(
                             f"Skipping audio stream index {stream.get('index')} for {self.media_file.filename}: low sample rate {sample_rate}."
                         )
@@ -654,12 +703,19 @@ class PreVideoEncoder(PreEncoder):
                 suitable_audio_streams.append(stream)
 
         if not suitable_audio_streams:
-            raise NoAudioStreamException(
-                f"No audio streams match desired languages after filtering for {self.media_file.filename}."
-            )
+            if not (self.args and getattr(self.args, "allow_no_audio", False)):
+                raise NoAudioStreamException(
+                    f"No audio streams match desired languages after filtering for {self.media_file.filename}."
+                )
+            else:
+                logger.warning(f"No suitable audio streams found for {self.media_file.filename} after language detection, "
+                               f"but --allow-no-audio is set. Proceeding without audio.")
+                self.output_audio_streams = []
+                return
+
         self.output_audio_streams = suitable_audio_streams
         logger.debug(
-            f"Selected {len(self.output_audio_streams)} audio streams for {self.media_file.filename}."
+            f"Selected {len(self.output_audio_streams)} audio streams for {self.media_file.filename} after language detection."
         )
 
     def _is_audio_stream_language_suitable(self, stream_data: Dict) -> bool:
@@ -669,14 +725,15 @@ class PreVideoEncoder(PreEncoder):
             logger.debug(f"Audio stream index {stream_data.get('index')} has suitable language tag: {lang_tag}")
             return True
 
-        if lang_tag and lang_tag != "und":
+        if lang_tag and lang_tag != "und": # "und" (未定義) 以外で、リストにないものは不適合とする
             logger.debug(
-                f"Audio stream index {stream_data.get('index')} has language '{lang_tag}', not in desired list. Considered unsuitable."
+                f"Audio stream index {stream_data.get('index')} has language '{lang_tag}', not in desired list {LANGUAGE_WORDS}. Considered unsuitable by tag."
             )
             return False
 
+        # タグが "und" または存在しない場合のみ言語検出を試みる
         if not lang_tag or lang_tag == "und":
-            lang_tag_if_exists = stream_data.get("tags", {}).get("language", "no")
+            lang_tag_if_exists = stream_data.get("tags", {}).get("language", "no_tag")
             logger.debug(
                 f"Audio stream index {stream_data.get('index')} for {self.media_file.filename} has '{lang_tag_if_exists}' language tag. Attempting language detection."
             )
@@ -684,6 +741,13 @@ class PreVideoEncoder(PreEncoder):
                 file_duration = (
                     self.media_file.duration if self.media_file.duration > 0 else 0
                 )
+                # ファイルが非常に短い場合、またはdurationが不明な場合、セグメント数を減らすか、検出をスキップするロジックも検討可能
+                if file_duration < 10: # 例: 10秒未満のファイルは検出が不安定な可能性
+                    logger.warning(f"File {self.media_file.filename} is very short ({file_duration}s). Language detection might be unreliable or skipped.")
+                    # ここで True を返すか、特定の短いファイル用の処理をするか選択
+                    # 安全策として、短い場合はタグがなければ不適合とすることもできる
+                    return False # 短すぎる場合は検出せず、タグがなければ不適合とする例
+
                 temp_dir_for_detection_str = getattr(self.args, "temp_work_dir", None)
                 temp_dir_for_detection = Path(temp_dir_for_detection_str) if temp_dir_for_detection_str else None
 
@@ -701,8 +765,10 @@ class PreVideoEncoder(PreEncoder):
                 logger.error(
                     f"Language detection failed for audio stream index {stream_data.get('index')} of {self.media_file.filename}: {det_ex}"
                 )
+                # 検出失敗時は、--allow-no-audio がなければ不適合とする
+                # (あるいは、タグが "und" の場合に限り True を返すなどのフォールバックも検討可能)
                 return False
-        return False
+        return False # 上記のいずれの条件にも当てはまらない場合 (基本的には到達しないはず)
 
     def _select_output_subtitle_streams(self):
         if not self.media_file.subtitle_streams:
@@ -714,7 +780,7 @@ class PreVideoEncoder(PreEncoder):
             lang_tag = stream.get("tags", {}).get("language", "").lower().strip()
             if lang_tag and lang_tag in LANGUAGE_WORDS:
                 suitable_subtitle_streams.append(stream)
-            elif not lang_tag or lang_tag == "und":
+            elif not lang_tag or lang_tag == "und": # 字幕の場合、言語不明は通常不要
                 logger.debug(f"Subtitle stream index {stream.get('index')} for {self.media_file.filename} has undetermined or no language tag. Skipping.")
         self.output_subtitle_streams = suitable_subtitle_streams
         logger.debug(f"Selected {len(self.output_subtitle_streams)} subtitle streams for {self.media_file.filename}.")
