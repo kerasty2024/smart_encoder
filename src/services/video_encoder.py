@@ -135,12 +135,28 @@ class VideoEncoder(Encoder):
 
         current_encoded_size = self.encoded_file.stat().st_size
         if current_encoded_size > self.original_media_file.size:
+            ABSOLUTE_MAX_CRF = 63  # The absolute maximum CRF value to try
             logger.warning(
                 f"Attempt {attempt}: File is oversized. Original: {formatted_size(self.original_media_file.size)}, "
                 f"Encoded: {formatted_size(current_encoded_size)} ({current_encoded_size / self.original_media_file.size:.2%} of original), "
                 f"CRF: {self.crf}"
             )
             self.encoded_file.unlink(missing_ok=True)
+
+            # --- ▼▼▼ CRF LIMIT HANDLING MODIFIED ▼▼▼ ---
+            # If the previous attempt was already at the max CRF, it's a permanent failure.
+            if self.crf == ABSOLUTE_MAX_CRF:
+                error_msg = f"Final attempt with max CRF ({ABSOLUTE_MAX_CRF}) still resulted in an oversized file. Cannot reduce size further."
+                logger.error(error_msg)
+                self.no_error = False
+                self.move_to_oversized_error_dir()
+                self.encode_info.dump(
+                    status=JOB_STATUS_ERROR_PERMANENT,
+                    last_error_message=error_msg,
+                    crf=self.crf,
+                )
+                return False
+            # --- ▲▲▲ CRF LIMIT HANDLING MODIFIED ▲▲▲ ---
 
             if attempt >= max_attempts:
                 error_msg = f"Max attempts ({max_attempts}) reached for oversized file {self.original_media_file.filename}. Cannot reduce size further with CRF."
@@ -154,24 +170,23 @@ class VideoEncoder(Encoder):
                 )
                 return False
 
-            crf_increment_val = (
-                self.crf * (MANUAL_CRF_INCREMENT_PERCENT / 100.0)
-                if self.crf is not None
-                else 2
-            )
-            new_crf = (self.crf or MANUAL_CRF) + max(1, int(round(crf_increment_val)))
+            oversize_ratio = current_encoded_size / self.original_media_file.size
+            try:
+                crf_increment = int(round(3 + 15 * ((oversize_ratio - 1) ** 1.5)))
+            except ValueError:
+                crf_increment = 3
+            crf_increment = max(3, crf_increment)
+            new_crf = (self.crf or MANUAL_CRF) + crf_increment
 
-            if new_crf > MAX_CRF:
-                error_msg = f"New CRF {new_crf} would exceed MAX_CRF {MAX_CRF}. Cannot re-encode {self.original_media_file.filename} to reduce size."
-                logger.error(error_msg)
-                self.no_error = False
-                self.move_to_oversized_error_dir()
-                self.encode_info.dump(
-                    status=JOB_STATUS_ERROR_PERMANENT,
-                    last_error_message=error_msg,
-                    crf=self.crf,
+            # --- ▼▼▼ CRF CAPPING LOGIC MODIFIED ▼▼▼ ---
+            # Cap the new CRF if it exceeds the limit, for one final attempt.
+            if new_crf > ABSOLUTE_MAX_CRF:
+                logger.warning(
+                    f"Calculated CRF ({new_crf}) exceeds the limit. "
+                    f"Capping at {ABSOLUTE_MAX_CRF} for a final attempt."
                 )
-                return False
+                new_crf = ABSOLUTE_MAX_CRF
+            # --- ▲▲▲ CRF CAPPING LOGIC MODIFIED ▲▲▲ ---
 
             self.crf = new_crf
             logger.info(
