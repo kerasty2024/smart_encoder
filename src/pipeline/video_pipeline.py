@@ -28,6 +28,7 @@ from ..services.file_processing_service import (
     ProcessPhoneFiles,
     ProcessAudioFiles,
     ProcessVideoFiles,
+    cleanup_empty_error_dirs,
 )
 
 # Config
@@ -300,6 +301,15 @@ class PhoneEncodingPipeline(BaseEncodeStarter):
                 self.process_files_handler.move_raw_folder_if_no_process_files(
                     phone_video_raw_target_root
                 )
+
+        try:
+            logger.info(
+                f"[{self.__class__.__name__}] Final cleanup of empty error directories."
+            )
+            cleanup_empty_error_dirs(self.project_dir)
+        except Exception as e:
+            logger.error(f"An error occurred during final error directory cleanup: {e}")
+
         logger.info(
             f"[{self.__class__.__name__}] Phone-specific post-actions completed."
         )
@@ -450,15 +460,29 @@ class StandardVideoPipeline(BaseEncodeStarter):
             logger.debug("StandardPipeline: Performing file management actions.")
             self.process_files_handler.remove_empty_dirs()
             self.process_files_handler.delete_temp_folders()
-            if is_final_run and hasattr(
-                self.process_files_handler, "move_raw_folder_if_no_process_files"
-            ):
-                logger.info(
-                    f"[{self.__class__.__name__}] Checking for empty raw video folders to move (final run)."
-                )
-                self.process_files_handler.move_raw_folder_if_no_process_files(
-                    COMPLETED_RAW_DIR
-                )
+
+            if is_final_run:
+                if hasattr(
+                    self.process_files_handler, "move_raw_folder_if_no_process_files"
+                ):
+                    logger.info(
+                        f"[{self.__class__.__name__}] Checking for empty raw video folders to move (final run)."
+                    )
+                    self.process_files_handler.move_raw_folder_if_no_process_files(
+                        COMPLETED_RAW_DIR
+                    )
+
+                # is_final_run の場合にのみエラーディレクトリのクリーンアップを実行
+                try:
+                    logger.info(
+                        f"[{self.__class__.__name__}] Final cleanup of empty error directories."
+                    )
+                    cleanup_empty_error_dirs(self.project_dir)
+                except Exception as e:
+                    logger.error(
+                        f"An error occurred during final error directory cleanup: {e}"
+                    )
+
             SuccessLog.generate_combined_log_yaml(self.project_dir)
             logger.info("StandardPipeline: File management actions completed.")
         except Exception as e:

@@ -8,7 +8,7 @@ from loguru import logger
 
 # Config
 from ..config.audio import AUDIO_EXTENSIONS
-from ..config.common import DEFAULT_SUCCESS_LOG_YAML, MINIMUM_FILE_SIZE
+from ..config.common import DEFAULT_SUCCESS_LOG_YAML, MINIMUM_FILE_SIZE, BASE_ERROR_DIR
 from ..config.video import EXCEPT_FOLDERS_KEYWORDS, VIDEO_EXTENSIONS
 from ..utils.format_utils import formatted_size
 
@@ -395,3 +395,56 @@ class ProcessAudioFiles(ProcessFiles):
                     discovered_audio_files.extend(list(d_path.glob(f"*{ext}")))
         self.files = tuple(sorted(list(set(discovered_audio_files))))
         logger.debug(f"ProcessAudioFiles: Discovered {len(self.files)} audio files.")
+
+
+def cleanup_empty_error_dirs(base_path: Path):
+    """
+    Removes subdirectories within the error directory if they do not contain any video files.
+    Also removes the main error directory if it becomes empty.
+    """
+    # BASE_ERROR_DIR might be resolved at import time. Use its name to construct a path
+    # relative to the determined project_path for consistency.
+    error_dir = base_path / BASE_ERROR_DIR.name
+
+    if not error_dir.is_dir():
+        logger.debug(f"Error directory not found at '{error_dir}', skipping cleanup.")
+        return
+
+    logger.info(f"Starting cleanup of empty error directories in '{error_dir}'...")
+
+    video_extensions_lower = {ext.lower() for ext in VIDEO_EXTENSIONS}
+
+    # Iterate through subdirectories of the error directory
+    # Note: Use list() to create a snapshot, as we might be deleting from the directory we are iterating.
+    subdirs_to_check = [d for d in error_dir.iterdir() if d.is_dir()]
+
+    for sub_dir in subdirs_to_check:
+        has_video_file = False
+        # Recursively check for video files in the subdirectory
+        for file_path in sub_dir.rglob('*'):
+            if file_path.is_file() and file_path.suffix.lower() in video_extensions_lower:
+                has_video_file = True
+                logger.trace(f"Found video file in '{sub_dir.name}', skipping deletion: {file_path.name}")
+                break  # Found one, no need to check further in this subdir
+
+        if not has_video_file:
+            logger.info(f"No video files found in '{sub_dir}'. Deleting directory.")
+            try:
+                shutil.rmtree(sub_dir)
+                logger.debug(f"Successfully deleted directory: '{sub_dir}'")
+            except OSError as e:
+                logger.error(f"Failed to delete directory '{sub_dir}': {e}")
+
+    # After cleaning subdirectories, check if the main error directory is now empty
+    try:
+        # Check if the directory is empty. any(error_dir.iterdir()) is a good way.
+        if not any(error_dir.iterdir()):
+            logger.info(f"Error directory '{error_dir}' is now empty after cleanup. Deleting it.")
+            error_dir.rmdir()
+            logger.debug(f"Successfully deleted empty error directory: '{error_dir}'")
+    except FileNotFoundError:
+        # This can happen if another process deletes it.
+        pass
+    except OSError as e:
+        # This can happen if the directory contains hidden files etc. that we didn't account for.
+        logger.warning(f"Could not remove final error directory '{error_dir}': {e}")

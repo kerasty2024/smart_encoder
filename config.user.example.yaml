@@ -1,0 +1,17 @@
+# smart_encoder/config.user.example.yaml
+
+# User-specific configuration for Smart Encoder.
+# Please copy this file to 'config.user.yaml' and edit it for your environment.
+# 'config.user.yaml' is ignored by Git, so your local settings won't be committed.
+
+paths:
+  # Path to the directory containing the ffmpeg and ffprobe executables.
+  # If left blank or commented out, the application will try to use the system's PATH.
+  # Example for Windows: 'C:/ffmpeg/bin'
+  # Example for Linux/macOS: '/usr/local/bin'
+  ffmpeg_dir: ''
+
+  # Path to the directory where updated modules are located.
+  # If you don't use this feature, you can leave it blank or comment it out.
+  # The application will simply skip the update check if this path is not defined.
+  module_update_dir: ''

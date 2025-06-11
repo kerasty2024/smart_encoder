@@ -1,132 +1,155 @@
+"""
+Provides the Modules class to handle updates and verification of external tools
+like FFmpeg.
+"""
+
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 from loguru import logger
 
-# Config
 from ..config.common import MODULE_PATH, MODULE_UPDATE_PATH
 
 
-class Modules:  # Consider renaming to ModuleUpdater for clarity
+class Modules:
     """
     A class to handle operations related to FFmpeg module updates and verification.
-    It assumes FFmpeg and other tools are located in MODULE_PATH and updates
-    are copied from MODULE_UPDATE_PATH.
+    It reads paths from the user configuration and provides a fallback to the
+    system's PATH.
     """
 
     @staticmethod
     def update():
         """
-        Updates modules by moving files from an update directory to the main module
-        directory and then verifies the installation of FFmpeg by checking its version.
+        Updates modules from the `module_update_dir` specified in the user config.
 
-        This method performs the following steps:
-        1. Checks if MODULE_UPDATE_PATH and MODULE_PATH exist.
-        2. If MODULE_UPDATE_PATH exists, moves all its contents to MODULE_PATH,
-           overwriting existing files if names collide.
-        3. Logs success or failure of each file move operation.
-        4. Runs 'ffmpeg -version' command to verify FFmpeg is installed (expected in MODULE_PATH or system PATH)
-           and logs its version.
-        5. Logs an error if FFmpeg command is not found or fails.
+        If the update path is configured and exists, this method moves all its
+        contents to the main module directory (`ffmpeg_dir`), overwriting
+        existing files if necessary. If the path is not configured, this step
+        is silently skipped.
         """
-        # Ensure paths from config are Path objects and resolved
-        module_update_dir = Path(MODULE_UPDATE_PATH).resolve()
-        main_module_dir = Path(MODULE_PATH).resolve()
-
-        # Step 1: Check existence of module directories
-        if not main_module_dir.is_dir():
-            logger.warning(
-                f"Main module directory {main_module_dir} does not exist. Skipping module update checks."
-            )
-            # Cannot check FFmpeg if its expected location doesn't exist (unless it's in system PATH)
-            # Proceed to FFmpeg check using system PATH.
-
-        elif module_update_dir.is_dir():  # Only proceed with move if update dir exists
-            logger.info(
-                f"Checking for module updates from {module_update_dir} to {main_module_dir}"
-            )
-
-            update_files_found = list(module_update_dir.glob("*"))
-            if not update_files_found:
-                logger.info("No files found in module update directory.")
-            else:
-                main_module_dir.mkdir(
-                    parents=True, exist_ok=True
-                )  # Ensure main module dir exists for moving
-                for update_item_path in update_files_found:
-                    destination_path = main_module_dir / update_item_path.name
-                    try:
-                        # shutil.move can move files or directories.
-                        # If destination_path exists and is a file, it's overwritten.
-                        # If destination_path exists and is a dir, shutil.move might error if update_item_path is also a dir,
-                        # unless the destination dir is empty or specific OS/Python version behavior.
-                        # For simplicity, assuming direct move/overwrite of files.
-                        # If update_item_path is a directory, this will move the directory *into* main_module_dir.
-                        if (
-                            destination_path.is_dir() and update_item_path.is_dir()
-                        ):  # Overwriting a dir with another
-                            logger.info(
-                                f"Destination {destination_path.name} is a directory. Removing it before moving new one."
-                            )
-                            shutil.rmtree(destination_path)
-
-                        shutil.move(str(update_item_path), str(destination_path))
-                        logger.info(
-                            f"Successfully moved {update_item_path.name} to {destination_path}"
-                        )
-                    except Exception as e:
-                        logger.error(
-                            f"Failed to move {update_item_path.name} to {destination_path}: {e}"
-                        )
-        else:
-            logger.info(
-                f"Module update directory {module_update_dir} not found. No updates applied from there."
-            )
-
-        # Step 2: Verify FFmpeg installation
-        # FFmpeg command might be in MODULE_PATH or system PATH.
-        # Construct command to prefer ffmpeg from MODULE_PATH if it exists.
-        ffmpeg_exe_path = (
-            main_module_dir / "ffmpeg.exe"
-        )  # Assuming Windows, adjust for cross-platform
-        if not ffmpeg_exe_path.is_file():  # Fallback to system PATH ffmpeg
-            ffmpeg_cmd = "ffmpeg"
+        if not MODULE_UPDATE_PATH:
             logger.debug(
-                "ffmpeg.exe not found in main module directory. Trying system PATH for ffmpeg."
+                "`module_update_dir` not configured. Skipping module update check."
             )
+            return
+
+        if not MODULE_PATH:
+            logger.error(
+                f"Module update path '{MODULE_UPDATE_PATH}' is set, but the destination "
+                f"`ffmpeg_dir` is not. Cannot perform update."
+            )
+            return
+
+        if not MODULE_UPDATE_PATH.is_dir():
+            logger.warning(
+                f"Configured module update directory '{MODULE_UPDATE_PATH}' does not exist or is not a directory. Skipping update."
+            )
+            return
+
+        logger.info(
+            f"Checking for module updates from '{MODULE_UPDATE_PATH}' to '{MODULE_PATH}'"
+        )
+
+        update_files_found = list(MODULE_UPDATE_PATH.glob("*"))
+        if not update_files_found:
+            logger.info("No files found in module update directory.")
         else:
-            ffmpeg_cmd = str(ffmpeg_exe_path)
-            logger.debug(f"Using ffmpeg from: {ffmpeg_cmd}")
+            MODULE_PATH.mkdir(parents=True, exist_ok=True)
+            for update_item_path in update_files_found:
+                destination_path = MODULE_PATH / update_item_path.name
+                try:
+                    if destination_path.is_dir() and update_item_path.is_dir():
+                        logger.info(
+                            f"Destination '{destination_path.name}' is a directory. Removing it before moving new one."
+                        )
+                        shutil.rmtree(destination_path)
+
+                    shutil.move(str(update_item_path), str(destination_path))
+                    logger.info(
+                        f"Successfully moved '{update_item_path.name}' to '{destination_path}'"
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"Failed to move '{update_item_path.name}' to '{destination_path}': {e}"
+                    )
+
+    @staticmethod
+    def _get_ffmpeg_path() -> str:
+        """
+        Determines the correct FFmpeg executable to use.
+
+        It prioritizes the path from the user configuration (`ffmpeg_dir`).
+        If not set, it falls back to 'ffmpeg', relying on the system's PATH.
+        It handles platform-specific executable names (e.g., '.exe' on Windows).
+
+        Returns:
+            The command or path to the FFmpeg executable.
+        """
+        # Determine the executable name based on the OS
+        ffmpeg_exe_name = "ffmpeg.exe" if sys.platform == "win32" else "ffmpeg"
+
+        if MODULE_PATH and MODULE_PATH.is_dir():
+            configured_ffmpeg_path = MODULE_PATH / ffmpeg_exe_name
+            if configured_ffmpeg_path.is_file():
+                logger.debug(
+                    f"Using FFmpeg from configured path: '{configured_ffmpeg_path}'"
+                )
+                return str(configured_ffmpeg_path)
+            else:
+                logger.warning(
+                    f"`ffmpeg_dir` is configured to '{MODULE_PATH}', but '{ffmpeg_exe_name}' was not found there. "
+                    "Falling back to system PATH."
+                )
+
+        # Fallback to system PATH
+        return "ffmpeg"
+
+    @staticmethod
+    def verify_ffmpeg():
+        """
+        Verifies that FFmpeg is installed and accessible.
+
+        This method runs `ffmpeg -version` and logs the output. It will log an
+        error if the command cannot be found or fails to execute.
+        """
+        ffmpeg_cmd = Modules._get_ffmpeg_path()
 
         try:
-            # Use subprocess.run for better control and output capture.
-            # `check=True` will raise CalledProcessError if ffmpeg returns non-zero.
-            # `text=True` decodes output as string.
             result = subprocess.run(
                 [ffmpeg_cmd, "-version"],
                 check=True,
                 capture_output=True,
                 text=True,
-                encoding="utf-8",  # Explicit encoding
+                encoding="utf-8",
             )
-            # Log first few lines of version output for brevity
             version_output_lines = result.stdout.splitlines()
             logger.info(
-                f"FFmpeg version check successful. Output (first few lines):\n"
-                f"{os.linesep.join(version_output_lines[:3])}"
-            )  # Log first 3 lines
+                f"FFmpeg version check successful. Output (first line):\n"
+                f"{version_output_lines[0]}"
+            )
         except subprocess.CalledProcessError as e:
             logger.error(
                 f"FFmpeg version command failed (return code {e.returncode}):\n{e.stderr}"
             )
         except FileNotFoundError:
             logger.error(
-                "FFmpeg command not found. Please ensure FFmpeg is installed, "
-                f"either in {main_module_dir} or in your system PATH."
+                "FFmpeg command not found. Please ensure FFmpeg is installed and accessible.\n"
+                "You can either add it to your system's PATH or specify its location "
+                "in the 'config.user.yaml' file."
             )
         except Exception as e:
             logger.error(
                 f"An unexpected error occurred while checking FFmpeg version: {e}"
             )
+
+    @staticmethod
+    def run_all():
+        """
+        A convenience method to run all checks and updates in sequence.
+        """
+        Modules.update()
+        Modules.verify_ffmpeg()

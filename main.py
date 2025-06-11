@@ -1,34 +1,52 @@
+"""
+Main entry point for the Smart Encoder application.
+
+This script initializes the application, parses command-line arguments,
+and launches the appropriate encoding pipeline based on the provided options.
+It serves as the orchestrator for the entire encoding process.
+"""
+
 import os
 import sys
 from pathlib import Path
 
 from loguru import logger
 
-# --- Paths need to be relative to this main.py file ---
-# Assuming src is a package in the same directory as main.py
 from src.cli import get_args
-from src.utils.module_updater import Modules
+from src.config.common import LOGGER_FORMAT
 from src.pipeline.video_pipeline import (
     PhoneEncodingPipeline,
     StandardVideoPipeline,
 )
-from src.config.common import LOGGER_FORMAT
+from src.utils.module_updater import Modules
 
-# Configure logger
+
+# Configure the logger for initial setup.
+# The level might be overridden later by command-line arguments.
 logger.remove()
-log_level = "DEBUG" if __debug__ else "INFO" # Basic check, args might override
+log_level = "DEBUG" if __debug__ else "INFO"
 logger.add(sys.stderr, level=log_level, format=LOGGER_FORMAT)
 
 
 def main():
     """
     Main function to start the encoding process.
-    Determines which pipeline to run based on arguments.
+
+    This function performs the following steps:
+    1. Checks for and applies module updates (e.g., FFmpeg).
+    2. Parses command-line arguments.
+    3. Configures the global logger based on the arguments.
+    4. Determines the target directory for processing.
+    5. Selects and runs the appropriate encoding pipeline (Standard or Phone-specific)
+       based on the parsed arguments.
+    6. Logs the final completion message.
     """
-    Modules.update()  # Perform module updates first
+    # Verify external tools and run updates if configured
+    Modules.run_all()
+
     args = get_args()
 
-    # Override log level if debug is set via CLI or python -O
+    # Re-configure the logger based on the effective log level from arguments or debug mode.
     if __debug__ and not getattr(args, 'debug_mode', False):
         effective_log_level = "DEBUG"
     elif getattr(args, 'debug_mode', False):
@@ -41,25 +59,20 @@ def main():
 
     logger.debug(f"Parsed arguments: {args}")
 
+    # Determine the project path to operate on.
     project_path_str = getattr(args, 'target_dir', None)
     if project_path_str:
         project_path = Path(project_path_str).resolve()
         logger.info(f"Target directory specified: {project_path}")
-        # Potentially change CWD if the script's logic heavily relies on it,
-        # though it's generally better to pass paths explicitly.
-        # os.chdir(project_path) # Avoid if possible
     else:
         project_path = Path.cwd().resolve()
         logger.info(f"No target directory specified, using current working directory: {project_path}")
 
-
+    # Select and execute the appropriate pipeline.
     if getattr(args, 'debug_iphone_mode', False):
         args.processes = 1
-        # target = r"Z:\encode\iPhone\audiobook" # This was hardcoded debug path
-        # project_path should now come from --target-dir if used, or CWD.
         args.audio_only = True
         args.move_raw_file = True
-        args.processes = 1 # Redundant, already set
         logger.info(f"Running in iPhone debug mode with overridden args for path: {project_path}")
         phone_pipeline = PhoneEncodingPipeline(project_path, args=args)
         phone_pipeline.process_multi_file()
@@ -78,19 +91,8 @@ def main():
 
 
 if __name__ == "__main__":
-    # Ensure the `src` package directory is in the Python path
-    # if main.py is in the parent directory of `src` package.
-    # This is often needed if you run `python main.py` from the project root.
-    current_dir = Path(__file__).resolve().parent
-    # Add the directory containing the 'src' package to sys.path
-    # This assumes 'src' is a subdirectory of where main.py is.
-    # If main.py is in the same dir as the 'src' folder, this is correct.
-    # If you place main.py somewhere else, adjust this.
-    # No, if main.py is in the root, and src is a subdir, Python should find it.
-    # This might be needed if main.py was inside another subdir. Let's assume it's not needed for now
-    # if it's in the project root.
-
-    # sys.path.insert(0, str(current_dir)) # Usually not needed if structure is root/main.py and root/src/
-
+    # This environment variable can help resolve some library conflicts,
+    # particularly with Intel's MKL library in environments with multiple
+    # conflicting versions.
     os.environ["KMP_DUPLICATE_LIB_OK"] = "True"
     main()

@@ -8,6 +8,7 @@ scripts/
 *.log
 lunch_project_structure_printer.cmd
 project_analysis_report.txt
+config.user.yaml
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

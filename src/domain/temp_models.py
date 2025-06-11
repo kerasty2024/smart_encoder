@@ -1,37 +1,42 @@
-# src/domain/temp_models.py
-from pathlib import Path
-import yaml
-from datetime import datetime
-from typing import Optional # Optional をインポート
+"""
+Defines data models for temporary state management, primarily for tracking
+encoding job progress and status.
+"""
 
-# common.py から JOB_STATUS 定数をインポート
-from ..config.common import (
-    JOB_STATUS_PENDING,
-    JOB_STATUS_PREPROCESSING_STARTED,
-    JOB_STATUS_CRF_SEARCH_STARTED,
-    JOB_STATUS_PREPROCESSING_DONE,
-    JOB_STATUS_ENCODING_FFMPEG_STARTED,
-    JOB_STATUS_COMPLETED,
-    JOB_STATUS_ERROR_RETRYABLE,
-    JOB_STATUS_ERROR_PERMANENT,
-    JOB_STATUS_SKIPPED
-)
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
+
+import yaml
+
+from ..config.common import JOB_STATUS_PENDING
+
 
 class EncodeInfo:
     """
-    Manages information about encoding attempts for a file, stored in a YAML file.
-    The YAML file is named after the hash of the original media file.
-    Includes job status and retry logic.
+    Manages information about an encoding job for a single file.
+
+    This class handles the creation, loading, and updating of a YAML file
+    that stores the state of an encoding task. This allows the application
+    to resume interrupted jobs or skip already completed ones. The state
+    file is named after the hash of the original media file.
+
+    Attributes:
+        file_hash (str): The hash (e.g., MD5) of the media file.
+        path (Path): The path to the YAML progress file.
+        status (str): The current status of the job (e.g., 'pending', 'completed').
+        retry_count (int): The number of times this job has been retried.
+        ... and other job-specific attributes.
     """
     def __init__(self, file_hash: str, encoder: str = "", crf: int = 0, storage_dir: Path = Path(".")):
         """
-        Initialize the EncodeInfo instance.
+        Initializes the EncodeInfo instance.
 
         Args:
-            file_hash (str): The hash (e.g., MD5) of the media file this info pertains to.
-            encoder (str, optional): Default encoder if known. Defaults to "".
-            crf (int, optional): Default CRF value if known. Defaults to 0.
-            storage_dir (Path, optional): Directory where the .yaml info file will be stored. Defaults to current dir.
+            file_hash: The hash of the media file this info pertains to.
+            encoder: The default encoder if known.
+            crf: The default CRF value if known.
+            storage_dir: Directory where the YAML progress file will be stored.
         """
         if not file_hash:
             raise ValueError("file_hash cannot be empty for EncodeInfo.")
@@ -39,18 +44,17 @@ class EncodeInfo:
         self.encoder = encoder
         self.crf = crf
         self.storage_dir = storage_dir.resolve()
-        self.storage_dir.mkdir(parents=True, exist_ok=True) # Ensure storage directory exists
-        self.path = self.storage_dir / f"{self.file_hash}.progress.yaml" # Changed filename
-        self.ori_video_path: Optional[str] = None # Path of the original video file
+        self.storage_dir.mkdir(parents=True, exist_ok=True)
+        self.path = self.storage_dir / f"{self.file_hash}.progress.yaml"
+        self.ori_video_path: Optional[str] = None
 
-        # New attributes for status management
         self.status: str = JOB_STATUS_PENDING
         self.ffmpeg_command: Optional[str] = None
-        self.temp_output_path: Optional[str] = None # ffmpegが実際に出力するファイルのパス
+        self.temp_output_path: Optional[str] = None
         self.last_error_message: Optional[str] = None
         self.retry_count: int = 0
         self.last_updated: Optional[str] = datetime.now().isoformat()
-        self.pre_encoder_data: Optional[dict] = None # Store pre-encoder results if needed for resume
+        self.pre_encoder_data: Optional[dict] = None
 
     def dump(self,
              status: Optional[str] = None,
@@ -64,14 +68,28 @@ class EncodeInfo:
              pre_encoder_data: Optional[dict] = None
             ):
         """
-        Update attributes and save them to the YAML file.
+        Updates attributes and saves the current state to the YAML file.
+
+        Any provided arguments will overwrite the existing instance attributes before
+        the state is written to the file.
+
+        Args:
+            status: New job status.
+            encoder: Encoder being used.
+            crf: CRF value being used.
+            ori_video_path: Path to the original source file.
+            ffmpeg_command: The ffmpeg command string for the current job.
+            temp_output_path: Path to the temporary output file.
+            last_error_message: The last error encountered.
+            increment_retry_count: If True, increments the retry counter.
+            pre_encoder_data: A dictionary of results from the pre-encoding stage.
         """
         if status: self.status = status
-        if encoder: self.encoder = encoder # Only update if provided
-        if crf is not None: self.crf = crf         # Update if crf is not None (0 is a valid CRF)
+        if encoder: self.encoder = encoder
+        if crf is not None: self.crf = crf
         if ori_video_path: self.ori_video_path = ori_video_path
         if ffmpeg_command: self.ffmpeg_command = ffmpeg_command
-        if temp_output_path: self.temp_output_path = temp_output_path # Allow clearing by passing None
+        if temp_output_path: self.temp_output_path = temp_output_path
         if last_error_message: self.last_error_message = last_error_message
         if increment_retry_count: self.retry_count += 1
         if pre_encoder_data: self.pre_encoder_data = pre_encoder_data
@@ -100,17 +118,16 @@ class EncodeInfo:
 
     def load(self) -> bool:
         """
-        Load attributes from the YAML file if it exists.
+        Loads job state from the YAML file if it exists.
 
         Returns:
-            bool: True if the file was successfully loaded, otherwise False.
+            True if the file was successfully loaded and parsed, otherwise False.
         """
         if self.path.exists() and self.path.is_file():
             try:
                 with self.path.open("r", encoding="utf-8") as f:
                     obj_dict = yaml.safe_load(f)
                 if obj_dict:
-                    self.file_hash = obj_dict.get("file_hash", self.file_hash) # Should match
                     self.ori_video_path = obj_dict.get("ori_video_path")
                     self.status = obj_dict.get("status", JOB_STATUS_PENDING)
                     self.encoder = obj_dict.get("encoder", "")
@@ -129,9 +146,7 @@ class EncodeInfo:
         return False
 
     def remove_file(self):
-        """
-        Remove the YAML file if it exists.
-        """
+        """Removes the YAML progress file from the filesystem."""
         try:
             if self.path.exists() and self.path.is_file():
                 self.path.unlink()

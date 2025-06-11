@@ -1,12 +1,24 @@
+"""
+Command-Line Interface (CLI) setup for the Smart Encoder.
+
+This module uses Python's `argparse` to define and parse the command-line
+arguments that control the application's behavior.
+"""
 import argparse
-from pathlib import Path # 追加
+from pathlib import Path
+
 
 def get_args() -> argparse.Namespace:
     """
     Parses command-line arguments for the Smart Encoder.
 
+    Defines various flags and options that allow users to customize the
+    encoding process, such as setting the number of parallel processes,
+    choosing a processing mode, or specifying paths.
+
     Returns:
-        argparse.Namespace: Parsed arguments.
+        argparse.Namespace: An object containing the parsed command-line
+                            arguments as attributes.
     """
     parser = argparse.ArgumentParser(description="Smart Encoder for video/audio files.")
     parser.add_argument(
@@ -44,10 +56,9 @@ def get_args() -> argparse.Namespace:
         help="Allow encoding video files even if no suitable audio stream is found (encodes video without audio)."
     )
     parser.add_argument(
-        "--temp-work-dir", type=str, default=None, # New argument
+        "--temp-work-dir", type=str, default=None,
         help="Specify a directory for temporary files. Useful for pointing to a RAM disk to reduce HDD/SSD writes."
     )
-    # Hypothetical arguments to manage different pipelines or debug modes from __main__.py
     parser.add_argument(
         "--iphone-specific-task", action="store_true",
         help="Run the encoding pipeline tailored for iPhone (uses PhoneEncodingPipeline)."
@@ -63,16 +74,15 @@ def get_args() -> argparse.Namespace:
 
     args = parser.parse_args()
 
-    # Validate temp_work_dir if provided
+    # Validate temp_work_dir if provided. If it doesn't exist, try to create it.
     if args.temp_work_dir:
         temp_dir_path = Path(args.temp_work_dir)
         if not temp_dir_path.is_dir():
-            # Try to create it if it doesn't exist
             try:
                 temp_dir_path.mkdir(parents=True, exist_ok=True)
                 print(f"INFO: Created temporary working directory: {temp_dir_path}")
             except Exception as e:
                 parser.error(f"The specified temporary working directory '{args.temp_work_dir}' is not a valid directory and could not be created: {e}")
-        args.temp_work_dir = temp_dir_path.resolve() # Store as resolved Path object
+        args.temp_work_dir = temp_dir_path.resolve()
 
     return args
