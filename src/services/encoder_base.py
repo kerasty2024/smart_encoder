@@ -1,3 +1,14 @@
+"""
+This module defines the abstract base class `Encoder`.
+
+This class serves as the foundation for all specific encoder services in the
+application (e.g., `VideoEncoder`, `AudioEncoder`). It establishes a standardized
+workflow and provides common functionalities for handling an encoding task from start
+to finish. By inheriting from this class, specific encoders can focus on their
+unique logic (like building the FFmpeg command) while reusing the shared logic for
+state management, logging, error handling, and file operations.
+"""
+
 import os
 import platform
 import shutil
@@ -31,6 +42,35 @@ from .preprocessing_service import PreEncoder
 
 
 class Encoder:
+    """
+    An abstract base class that defines the blueprint for an encoding task.
+
+    This class is not meant to be instantiated directly. Instead, concrete encoder
+    classes (like `VideoEncoder`) should inherit from it and implement the
+    abstract methods (`encode`, `_set_metadata_comment`).
+
+    The `Encoder` class orchestrates the encoding lifecycle:
+    1. `start()`: The main entry point. It checks the job status to see if it can
+       be resumed, skipped, or if it needs to start from the beginning.
+    2. Pre-encoding (optional): If a `pre_encoder` is defined, it runs first to
+       analyze the file and determine encoding parameters.
+    3. `_perform_encode()`: A wrapper that handles the actual encoding call,
+       manages timing, and updates the job status to 'completed' on success.
+    4. `encode()`: The abstract method that subclasses must implement to build and
+       execute their specific FFmpeg command.
+    5. `post_actions()`: Performs final cleanup tasks like moving the original file
+       and logging a final summary message.
+
+    Attributes:
+        original_media_file (MediaFile): The source file being processed.
+        args (Any): Parsed command-line arguments.
+        no_error (bool): A flag indicating if the process has been successful so far.
+        encode_info (EncodeInfo): The state management object for this job.
+        pre_encoder (Optional[PreEncoder]): An optional pre-encoder service.
+        encoded_file (Path): Path to the final output file.
+        renamed_original_file (Optional[Path]): The new path of the source file if
+                                                 it was moved during the process.
+    """
     pre_encoder: Optional[PreEncoder] = None
     encode_start_datetime: datetime
     encode_end_datetime: datetime
@@ -49,6 +89,13 @@ class Encoder:
     encode_cmd_list: List[str] = []
 
     def __init__(self, media_file: MediaFile, args: Any):
+        """
+        Initializes the base attributes for all encoder types.
+
+        Args:
+            media_file: The `MediaFile` object representing the source file.
+            args: The parsed command-line arguments from the CLI.
+        """
         self.original_media_file = media_file
         self.args = args
         self.no_error = True
@@ -64,6 +111,14 @@ class Encoder:
         self.keep_mtime = args.keep_mtime if hasattr(args, "keep_mtime") else False
 
     def start(self):
+        """
+        The main entry point to start the encoding process for a single file.
+
+        This method orchestrates the entire workflow. It checks the job's status
+        to handle resumes, skips, or completed jobs gracefully. If the job is new
+        or pending, it will run the pre-encoder (if available), perform the encode,
+        and then run post-actions for cleanup.
+        """
         if not hasattr(self, "encode_info") or not self.encode_info:
             logger.warning(
                 f"EncodeInfo not set for {self.original_media_file.filename} before Encoder.start(). Initializing a default one."
@@ -276,6 +331,14 @@ class Encoder:
         self.post_actions()
 
     def _perform_encode(self):
+        """
+        Wraps the main encoding call, handling retries and timing.
+
+        This method is called after pre-processing is complete. It checks if the
+        job is being resumed or retried, cleans up any previous temporary files,
+        and then calls the abstract `encode()` method. Upon successful completion,
+        it calculates the total time taken and updates the job status to 'completed'.
+        """
         if self.encode_info.status == JOB_STATUS_ENCODING_FFMPEG_STARTED or (
             self.encode_info.status == JOB_STATUS_ERROR_RETRYABLE
             and self.encode_info.ffmpeg_command
@@ -364,6 +427,20 @@ class Encoder:
         return_code: int,
         is_retryable_error: bool = True,
     ):
+        """
+        Handles a failed FFmpeg command execution.
+
+        This is a centralized error-handling function. It logs detailed information
+        about the failure, writes to a dedicated error log file, updates the
+        job's state to either 'retryable' or 'permanent', and cleans up.
+
+        Args:
+            res_stdout: The standard output from the failed FFmpeg process.
+            res_stderr: The standard error from the failed FFmpeg process.
+            return_code: The exit code of the FFmpeg process.
+            is_retryable_error: A flag indicating if this error type should
+                                allow for retries.
+        """
         self.no_error = False
         error_message_short = f"ffmpeg failed (rc={return_code})"
         error_message_full = (
@@ -471,6 +548,19 @@ class Encoder:
     def write_success_log(
         self, log_date_in_filename=True, update_dic: Optional[dict] = None
     ):
+        """
+        Creates and writes a detailed success log entry to a YAML file.
+
+        This method gathers a comprehensive set of data about the completed job,
+        including file paths, sizes, timings, quality metrics, and system info.
+        It then uses the `SuccessLog` service to persist this data. Subclasses
+        can provide additional data via the `update_dic` parameter.
+
+        Args:
+            log_date_in_filename: If True, the log filename will include the date.
+            update_dic: An optional dictionary with additional data to be
+                        included in the log entry.
+        """
         if self.encode_info.status != JOB_STATUS_COMPLETED:
             logger.debug(
                 f"Skipping success log for {self.original_media_file.filename}: job status is {self.encode_info.status}"
@@ -571,9 +661,23 @@ class Encoder:
         )
 
     def encode(self):
+        """
+        Abstract method for encoding. Must be implemented by subclasses.
+
+        The implementation of this method should contain the specific logic for
+        building and executing the FFmpeg command for that particular encoder type.
+        """
         raise NotImplementedError("Subclasses must implement the encode() method.")
 
     def _move_original_raw_file(self):
+        """
+        Moves the original source file to an archive directory after success.
+
+        This method is triggered by the `--move-raw-file` command-line flag.
+        It moves the successfully encoded source file to a 'raw' directory to
+        keep the source folder clean. It includes logic to handle cases where
+        a file with the same name already exists in the archive.
+        """
         if self.encode_info.status != JOB_STATUS_COMPLETED:
             logger.debug(
                 f"Skipping move of raw file for {self.original_media_file.filename} as job status is '{self.encode_info.status}'."
@@ -663,6 +767,14 @@ class Encoder:
                 )
 
     def post_actions(self):
+        """
+        Performs final cleanup and logging actions for the job.
+
+        This method is called at the very end of the `start()` workflow,
+        regardless of whether the encoding succeeded or failed. It cleans up the
+        job progress file, moves the raw file if needed, and logs a final,
+        human-readable summary message to the console.
+        """
         if self.encode_info.status == JOB_STATUS_COMPLETED:
             logger.debug(
                 f"Encoding completed for {self.original_media_file.filename}. Removing progress file: {self.encode_info.path}"
@@ -744,4 +856,11 @@ class Encoder:
             )
 
     def _set_metadata_comment(self):
+        """
+        Abstract method for setting the metadata comment. Must be implemented.
+
+        The implementation should create a YAML-formatted string with relevant
+        metadata for the specific encoding type and store it in the
+        `self.encoded_comment_text` attribute.
+        """
         raise NotImplementedError("Subclasses must implement _set_metadata_comment().")

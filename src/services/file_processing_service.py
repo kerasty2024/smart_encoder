@@ -1,3 +1,14 @@
+"""
+Provides services for discovering, managing, and cleaning up media files.
+
+This module contains the logic for the initial phase of the pipeline, where
+the application scans for files to process. The services here are responsible for:
+- Finding all relevant media files (video or audio) in a directory tree.
+- Excluding irrelevant directories (like output folders).
+- Performing cleanup tasks such as deleting small/invalid files, removing empty
+  directories, and standardizing filenames to prevent issues with other tools.
+"""
+
 import re
 import shutil
 from pathlib import Path
@@ -14,12 +25,43 @@ from ..utils.format_utils import formatted_size
 
 
 class ProcessFiles:
+    """
+    A base class for discovering and managing files to be processed.
+
+    This class provides the core functionality for scanning a directory, finding
+    subdirectories, and managing a list of files. It is not intended to be used
+    directly but should be subclassed (e.g., by `ProcessVideoFiles`) to implement
+    the logic for finding specific types of files.
+
+    Responsibilities:
+    - Determine the root source directory from a given path.
+    - Recursively scan for all subdirectories, respecting exclusion keywords.
+    - Provide methods for standardizing filenames, removing small files, and
+      cleaning up empty or temporary directories.
+
+    Attributes:
+        dirs (Set[Path]): A set of all directories to be scanned for files.
+        files (Tuple[Path, ...]): A tuple of all discovered media files to be processed.
+        source_dir (Path | None): The root directory for the entire operation.
+        args (Any): The parsed command-line arguments.
+    """
     dirs: Set[Path] = set()
     files: Tuple[Path, ...] = tuple()
     source_dir: Path | None = None
     args: Any
 
     def __init__(self, path: Path, args: Optional[Any] = None):
+        """
+        Initializes the file processor.
+
+        It determines the source directory from the input path and then calls
+        methods to discover all relevant directories and files. It may also
+        standardize filenames if not disabled by the '--not-rename' flag.
+
+        Args:
+            path: The input path, which can be a file or a directory.
+            args: The parsed command-line arguments from the CLI.
+        """
         self.args = args
         self.source_dir = self._get_source_directory_from_path(path)
 
@@ -42,6 +84,18 @@ class ProcessFiles:
 
     @staticmethod
     def _get_source_directory_from_path(input_path: Path) -> Path | None:
+        """
+        Resolves an input path to a valid source directory.
+
+        If the input path is a file, its parent directory is returned. If it's
+        a directory, the directory itself is returned.
+
+        Args:
+            input_path: The path to resolve.
+
+        Returns:
+            A `Path` object to the source directory, or `None` if the path is invalid.
+        """
         if input_path is None:
             return None
         resolved_path = input_path.resolve()
@@ -56,9 +110,23 @@ class ProcessFiles:
         return None
 
     def set_files_to_process(self):
+        """
+        Abstract method to discover and set the files to be processed.
+
+        Subclasses must implement this method to populate the `self.files`
+        attribute with a tuple of `Path` objects, based on the specific file
+        types they are designed to handle (e.g., video or audio extensions).
+        """
         raise NotImplementedError("Subclasses must implement set_files_to_process().")
 
     def set_dirs_to_scan(self):
+        """
+        Scans the source directory recursively and populates `self.dirs`.
+
+        This method finds all subdirectories within the `source_dir`. It respects
+        the `EXCEPT_FOLDERS_KEYWORDS` configuration to avoid scanning output or
+        error directories, which could lead to infinite processing loops.
+        """
         if not self.source_dir:
             self.dirs = set()
             return
@@ -88,6 +156,12 @@ class ProcessFiles:
         )
 
     def remove_empty_dirs(self):
+        """
+        Finds and removes all empty subdirectories within the source directory.
+
+        This method runs iteratively to handle nested empty directories. For example,
+        if `A/B/` is empty, it first removes `B`, and in the next pass, it removes `A`.
+        """
         if not self.source_dir:
             return
         deleted_in_pass = True
@@ -119,6 +193,13 @@ class ProcessFiles:
 
     @staticmethod
     def _handle_access_denied_for_dir_removal(directory: Path):
+        """
+        A helper method for debugging when a directory cannot be deleted.
+
+        If `remove_empty_dirs` encounters an "Access Denied" error, this method
+        is called to list the contents of the directory, which might provide
+        clues as to why it's not considered empty (e.g., hidden files).
+        """
         logger.warning(
             f"Access denied trying to remove {directory}. Attempting to list contents for clues."
         )
@@ -133,6 +214,13 @@ class ProcessFiles:
             )
 
     def delete_temp_folders(self):
+        """
+        Finds and deletes temporary folders created by external tools.
+
+        This method specifically targets folders matching patterns like
+        `.ab-av1-*`, which are created by the `ab-av1` tool during the
+        CRF search process.
+        """
         if not self.source_dir:
             return
         temp_patterns = [".ab-av1-*", ".temp*"]
@@ -151,6 +239,18 @@ class ProcessFiles:
         self.set_dirs_to_scan() # Rescan after deleting
 
     def move_raw_folder_if_no_process_files(self, destination_root: Path):
+        """
+        Archives a source subdirectory if it no longer contains processable files.
+
+        This is a cleanup utility used by pipelines. After a batch of files in
+        a subdirectory has been processed, this method checks if any processable
+        files remain. If not, the entire subdirectory is moved to an archive
+        location (`destination_root`) to signify that its contents are complete.
+
+        Args:
+            destination_root: The root directory of the archive where the
+                              source subdirectory will be moved.
+        """
         if not self.source_dir:
             logger.warning(
                 f"Source directory not set for {self.__class__.__name__}, cannot move raw folders."
@@ -204,6 +304,16 @@ class ProcessFiles:
         self.set_files_to_process()
 
     def standardize_discovered_file_names(self):
+        """
+        Normalizes the names of all discovered files.
+
+        This method cleans up filenames to prevent potential issues with command-line
+        tools. It performs actions like:
+        - Replacing multiple whitespace characters with a single space.
+        - Removing specific character sets (e.g., Korean characters) that can
+          cause problems in some environments.
+        - The original file is renamed on the filesystem.
+        """
         if not self.files:
             return
 
@@ -262,6 +372,14 @@ class ProcessFiles:
         self.files = tuple(updated_files_list) # Update the instance's file list
 
     def standardize_dir_names(self): # This method is complex and not directly related to the bug, keeping as is.
+        """
+        Normalizes the names of discovered directories.
+
+        This method cleans up directory names by replacing characters that can
+        be problematic in file paths or scripts.
+        Note: Use with caution, as changing directory names during processing
+        can be risky.
+        """
         logger.warning(
             "standardize_dir_names is complex and might lead to issues if paths change during processing. Use with caution or as a separate utility."
         )
@@ -305,6 +423,17 @@ class ProcessFiles:
         self.dirs = updated_dirs_set
 
     def remove_small_files(self, min_size_bytes: int = MINIMUM_FILE_SIZE):
+        """
+        Deletes discovered files that are smaller than a configured threshold.
+
+        This is used to filter out invalid, empty, or corrupted files that
+        are too small to be valid media files, preventing them from causing
+        errors later in the pipeline.
+
+        Args:
+            min_size_bytes: The minimum file size in bytes. Files smaller
+                            than this will be deleted.
+        """
         if not self.files:
             return
         logger.info(
@@ -337,7 +466,16 @@ class ProcessFiles:
 
 
 class ProcessVideoFiles(ProcessFiles):
+    """
+    A concrete file processor that discovers video files.
+
+    This class implements `set_files_to_process` to specifically look for
+    files with extensions listed in the `VIDEO_EXTENSIONS` config.
+    """
     def set_files_to_process(self):
+        """
+        Scans the directories and populates `self.files` with video files.
+        """
         if not self.dirs:
             self.files = tuple()
             return
@@ -351,7 +489,18 @@ class ProcessVideoFiles(ProcessFiles):
 
 
 class ProcessPhoneFiles(ProcessVideoFiles):
+    """
+
+    Extends `ProcessVideoFiles` with logic to avoid reprocessing completed files.
+
+    This class is used by the `PhoneEncodingPipeline`. In addition to finding
+    video files, it reads the main success log and excludes any files that
+    have already been successfully processed in previous runs.
+    """
     def set_files_to_process(self):
+        """
+        Discovers video files and then filters out any that are already logged as complete.
+        """
         super().set_files_to_process()
         success_log_path = Path.cwd() / DEFAULT_SUCCESS_LOG_YAML
         processed_file_stems = set()
@@ -384,7 +533,16 @@ class ProcessPhoneFiles(ProcessVideoFiles):
 
 
 class ProcessAudioFiles(ProcessFiles):
+    """
+    A concrete file processor that discovers audio files.
+
+    This class implements `set_files_to_process` to specifically look for
+    files with extensions listed in the `AUDIO_EXTENSIONS` config.
+    """
     def set_files_to_process(self):
+        """
+        Scans the directories and populates `self.files` with audio files.
+        """
         if not self.dirs:
             self.files = tuple()
             return
@@ -399,8 +557,16 @@ class ProcessAudioFiles(ProcessFiles):
 
 def cleanup_empty_error_dirs(base_path: Path):
     """
-    Removes subdirectories within the error directory if they do not contain any video files.
-    Also removes the main error directory if it becomes empty.
+    Removes subdirectories within the main error directory if they are empty.
+
+    This function is a final cleanup step. It scans the main application error
+    directory (e.g., 'encode_error/'). If any of its subdirectories (like
+    'load_failed/', 'no_audio_found/') no longer contain any files, this
+    function will delete them. It also removes the main error directory itself
+    if it becomes completely empty.
+
+    Args:
+        base_path: The root project path from which to find the error directory.
     """
     # BASE_ERROR_DIR might be resolved at import time. Use its name to construct a path
     # relative to the determined project_path for consistency.

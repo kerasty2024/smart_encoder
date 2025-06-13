@@ -63,10 +63,10 @@ def main():
     project_path_str = getattr(args, 'target_dir', None)
     if project_path_str:
         project_path = Path(project_path_str).resolve()
-        logger.info(f"Target directory specified: {project_path}")
+        logger.debug(f"Target directory specified: {project_path}")
     else:
         project_path = Path.cwd().resolve()
-        logger.info(f"No target directory specified, using current working directory: {project_path}")
+        logger.debug(f"No target directory specified, using current working directory: {project_path}")
 
     # Select and execute the appropriate pipeline.
     if getattr(args, 'debug_iphone_mode', False):

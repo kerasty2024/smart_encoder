@@ -1,3 +1,20 @@
+"""
+Defines the encoding pipelines that orchestrate the video and audio processing workflows.
+
+This module contains the core logic for managing the encoding process from start to
+finish. It defines a base pipeline class (`BaseEncodeStarter`) and specific
+implementations for different encoding scenarios:
+
+- `PhoneEncodingPipeline`: A specialized pipeline for encoding media files (video or
+  audio-only) with settings optimized for mobile devices, particularly iPhones.
+- `StandardVideoPipeline`: The main pipeline for general-purpose video encoding,
+  which includes an automated quality-finding step (CRF search) before the
+  main encode.
+
+These pipelines handle file discovery, parallel processing using a process pool,
+job state management (via `EncodeInfo`), and post-processing cleanup actions.
+"""
+
 import concurrent.futures
 import os
 import argparse
@@ -5,7 +22,7 @@ import random
 import shutil
 import traceback
 from pathlib import Path
-from typing import Optional, List, Any  # Tupleは削除
+from typing import Optional, List, Any
 import sys
 
 from loguru import logger
@@ -58,23 +75,73 @@ from ..config.common import (
 
 
 class BaseEncodeStarter:
+    """
+    An abstract base class for encoding pipelines.
+
+    This class provides the foundational structure and common functionalities for all
+    encoding pipelines, such as initializing paths, managing concurrent processing of
+    files, and performing common cleanup actions. Subclasses are expected to implement
+    the specifics of their encoding strategy.
+
+    Attributes:
+        encoder_instance (Optional[Encoder]): The encoder service instance. To be defined by subclasses.
+        process_files_handler (Optional[ProcessFiles]): The file processing service instance.
+        encoded_dir (Path): The root directory for encoded output.
+        project_dir (Path): The absolute path to the directory being processed.
+        args (argparse.Namespace): The command-line arguments.
+    """
     encoder_instance: Optional[Encoder] = None
     process_files_handler: Optional[ProcessFiles] = None
     encoded_dir: Path
 
     def __init__(self, project_dir: Path, args: argparse.Namespace):
+        """
+        Initializes the BaseEncodeStarter.
+
+        Args:
+            project_dir: The directory where media files are located.
+            args: The parsed command-line arguments.
+        """
         self.project_dir: Path = project_dir.resolve()
         self.args = args
 
     def process_single_file(self, path: Path):
+        """
+        A placeholder method for processing a single media file.
+
+        Subclasses must implement this method to define the specific encoding
+        logic for a single file. This method will be called concurrently by
+        `process_multi_file`.
+
+        Args:
+            path: The path to the media file to process.
+        """
         raise NotImplementedError("Subclasses must implement process_single_file.")
 
     def _initialize_file_processor(self):
+        """
+
+        A placeholder method for initializing the file processor.
+
+        Subclasses must implement this method to instantiate the appropriate
+        `ProcessFiles` handler (e.g., `ProcessVideoFiles`, `ProcessAudioFiles`)
+        which will discover the files to be processed.
+        """
         raise NotImplementedError(
             "Subclasses must implement _initialize_file_processor."
         )
 
     def process_multi_file(self):
+        """
+        Processes multiple media files in parallel.
+
+        This method orchestrates the main batch processing loop. It does the following:
+        1. Initializes the file processor to get a list of files.
+        2. Sorts or randomizes the file list based on command-line arguments.
+        3. Creates a process pool using `concurrent.futures.ProcessPoolExecutor`.
+        4. Submits each file to the `process_single_file` method for concurrent execution.
+        5. Waits for all tasks to complete and logs any errors that occur in the child processes.
+        """
         self._initialize_file_processor()
         if not self.process_files_handler or not self.process_files_handler.source_dir:
             logger.info(
@@ -151,6 +218,12 @@ class BaseEncodeStarter:
         )
 
     def common_post_actions(self):
+        """
+        Performs common cleanup and finalization tasks after processing.
+
+        This includes removing empty directories, deleting temporary folders, and
+        generating a consolidated success log from individual log files.
+        """
         if self.process_files_handler:
             logger.info(
                 f"[{self.__class__.__name__}] Running common post-actions: removing empty dirs, deleting temp folders."
@@ -163,7 +236,24 @@ class BaseEncodeStarter:
 
 
 class PhoneEncodingPipeline(BaseEncodeStarter):
+    """
+    A pipeline specifically for encoding media for mobile devices (e.g., iPhone).
+
+    This pipeline handles both video and audio-only encoding tasks using profiles
+    optimized for mobile playback. It uses fixed encoding parameters rather than
+    performing a quality search, making it faster for this specific use case.
+    """
     def __init__(self, project_dir: Path, args: argparse.Namespace):
+        """
+        Initializes the PhoneEncodingPipeline.
+
+        Sets the output directory based on whether it's an audio-only or a
+        video encoding task.
+
+        Args:
+            project_dir: The directory containing media files.
+            args: The parsed command-line arguments.
+        """
         super().__init__(project_dir, args)
         if self.args.audio_only:
             self.encoded_dir = AUDIO_ENCODED_ROOT_DIR.resolve()
@@ -172,12 +262,31 @@ class PhoneEncodingPipeline(BaseEncodeStarter):
         self.encoded_dir.mkdir(parents=True, exist_ok=True)
 
     def _initialize_file_processor(self):
+        """
+        Initializes the file processor for the phone pipeline.
+
+        It selects `ProcessAudioFiles` for audio-only tasks or `ProcessPhoneFiles`
+        for video tasks, based on the `--audio-only` flag.
+        """
         if self.args.audio_only:
             self.process_files_handler = ProcessAudioFiles(self.project_dir, self.args)
         else:
             self.process_files_handler = ProcessPhoneFiles(self.project_dir, self.args)
 
     def process_single_file(self, path: Path):
+        """
+        Processes a single media file for the phone-specific profile.
+
+        This method is the entry point for each concurrent worker process. It:
+        1. Instantiates a `MediaFile` to analyze the source file.
+        2. Selects the appropriate encoder (`AudioEncoder` or `PhoneVideoEncoder`).
+        3. Checks the `EncodeInfo` for the job's status to handle resumes, skips, or retries.
+        4. Calls the encoder's `start()` method to begin the actual encoding.
+        5. Handles exceptions, logs errors, and updates the job status accordingly.
+
+        Args:
+            path: The path to the media file to be processed.
+        """
         logger.debug(f"PhonePipeline: Child process started for: {path.name}")
         media_file: Optional[MediaFile] = None
         encoder_instance: Optional[Encoder] = None
@@ -256,7 +365,7 @@ class PhoneEncodingPipeline(BaseEncodeStarter):
             error_msg = (
                 f"PhonePipeline: Unhandled error in child process for file: {path.name}\n"
                 f"Exception type: {type(e).__name__}\n"
-                f"Exception message: {e}\n"
+f"Exception message: {e}\n"
                 f"EncodeInfo path (if available): {job_info_path_for_log}\n"
                 f"Traceback:\n{''.join(tb_str)}"
             )
@@ -280,6 +389,12 @@ class PhoneEncodingPipeline(BaseEncodeStarter):
             logger.debug(f"PhonePipeline: Child process for {path.name} is exiting.")
 
     def post_actions(self):
+        """
+        Performs post-processing actions specific to the phone pipeline.
+
+        This calls the common post-actions and adds specific logic to handle the
+        archiving of empty raw material folders.
+        """
         self.common_post_actions()
         if self.process_files_handler:
             if self.args.audio_only and hasattr(
@@ -316,15 +431,50 @@ class PhoneEncodingPipeline(BaseEncodeStarter):
 
 
 class StandardVideoPipeline(BaseEncodeStarter):
+    """
+    The main pipeline for standard, high-quality video encoding.
+
+    This pipeline is responsible for processing general video files. Its key feature
+    is a two-stage process: first, a pre-encoding step (`PreVideoEncoder`) determines
+    the optimal quality settings (CRF) for a target VMAF score. Second, the main
+    `VideoEncoder` uses these settings to perform the final, full-length encode.
+    """
     def __init__(self, project_dir: Path, args: argparse.Namespace):
+        """
+        Initializes the StandardVideoPipeline.
+
+        Args:
+            project_dir: The directory containing video files.
+            args: The parsed command-line arguments.
+        """
         super().__init__(project_dir, args)
         self.encoded_dir = VIDEO_OUT_DIR_ROOT.resolve()
         self.encoded_dir.mkdir(parents=True, exist_ok=True)
 
     def _initialize_file_processor(self):
+        """
+        Initializes the file processor to discover video files.
+
+        This implementation uses `ProcessVideoFiles` to scan for and list all
+        supported video file types in the target directory.
+        """
         self.process_files_handler = ProcessVideoFiles(self.project_dir, self.args)
 
     def process_single_file(self, file_path: Path):
+        """
+        Processes a single video file through the standard pipeline.
+
+        This is the core logic for each worker process. It performs the following steps:
+        1. Instantiates `MediaFile` to analyze the video.
+        2. Instantiates `VideoEncoder`, which in turn creates a `PreVideoEncoder`.
+        3. Checks the `EncodeInfo` for job status to handle resumes, skips, or retries.
+        4. Calls `video_encoder.start()`, which triggers the pre-encoding (CRF search)
+           and then the main encoding process.
+        5. Handles exceptions, logs errors, and manages job state.
+
+        Args:
+            file_path: The path to the video file to be processed.
+        """
         logger.debug(f"StandardPipeline: Child process started for: {file_path.name}")
         media_file: Optional[MediaFile] = None
         video_encoder: Optional[VideoEncoder] = None
@@ -451,6 +601,16 @@ class StandardVideoPipeline(BaseEncodeStarter):
             )
 
     def _perform_file_management_actions(self, is_final_run: bool = False):
+        """
+        Encapsulates file and directory cleanup tasks.
+
+        This method removes empty directories and temporary folders. On the final
+        run of the pipeline, it performs more thorough cleanup, such as removing
+        empty error directories.
+
+        Args:
+            is_final_run: If True, performs additional final cleanup tasks.
+        """
         if not self.process_files_handler or not self.process_files_handler.source_dir:
             logger.warning(
                 "StandardPipeline: File processor not initialized, skipping file management."
@@ -472,7 +632,7 @@ class StandardVideoPipeline(BaseEncodeStarter):
                         COMPLETED_RAW_DIR
                     )
 
-                # is_final_run の場合にのみエラーディレクトリのクリーンアップを実行
+                # Perform error directory cleanup only on the final run
                 try:
                     logger.info(
                         f"[{self.__class__.__name__}] Final cleanup of empty error directories."
@@ -495,6 +655,16 @@ class StandardVideoPipeline(BaseEncodeStarter):
             )
 
     def run(self):
+        """
+        The main entry point for the standard video pipeline.
+
+        This method orchestrates the entire workflow:
+        1. Initializes the file processor.
+        2. Performs preliminary file management actions.
+        3. Calls `process_multi_file` to execute the main encoding loop.
+        4. Handles graceful shutdown on user interruption (`KeyboardInterrupt`).
+        5. Performs final file management and cleanup actions.
+        """
         logger.info(  # Changed to INFO
             f"StandardPipeline: Starting video encoding in path: {self.project_dir}"
         )

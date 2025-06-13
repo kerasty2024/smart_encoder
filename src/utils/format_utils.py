@@ -1,21 +1,29 @@
-from datetime import timedelta  # Ensure this is imported if not already
+"""
+This module contains helper functions for formatting data into human-readable strings.
+These functions are used throughout the application, particularly in logging, to
+present information like time durations and file sizes in a clear and consistent way.
+"""
+
+from datetime import timedelta
 from pathlib import Path
-from typing import List, Any, Dict  # Added Any, Dict for find_key_in_dictionary
+from typing import List, Any, Dict
 
 
 def format_timedelta(td_object: timedelta) -> str:
     """
-    Formats a timedelta object into a string "HH:MM:SS".
+    Formats a timedelta object into a "HH:MM:SS" string.
+
+    This is useful for displaying elapsed times in a standard, easy-to-read format.
 
     Args:
         td_object: The timedelta object to format.
 
     Returns:
         A string representing the timedelta in HH:MM:SS format.
+        For example, a timedelta of 7261 seconds becomes "02:01:01".
+        Returns "00:00:00" if the input is not a valid timedelta object.
     """
     if not isinstance(td_object, timedelta):
-        # Handle cases where td_object might be None or other types gracefully
-        # Or raise TypeError("Input must be a timedelta object")
         return "00:00:00"
 
     total_seconds = int(td_object.total_seconds())
@@ -26,52 +34,52 @@ def format_timedelta(td_object: timedelta) -> str:
 
 def formatted_size(size_bytes: int) -> str:
     """
-    Converts a size in bytes to a human-readable string format (B, KB, MB, GB, TB).
+    Converts a size in bytes to a human-readable string (e.g., B, KB, MB, GB, TB).
+
+    This function makes large file sizes much easier to understand at a glance in
+    log messages and reports.
 
     Args:
-        size_bytes: Size in bytes.
+        size_bytes: The size of the file in bytes.
 
     Returns:
-        Formatted string with appropriate unit.
+        A formatted string with the appropriate unit.
+        For example, 1536 becomes "1.50 KB", and 2097152 becomes "2.00 MB".
     """
     if size_bytes < 0:
-        size_bytes = 0  # Handle negative sizes if they can occur
+        size_bytes = 0
 
-    units = ["B", "KB", "MB", "GB", "TB", "PB"]  # Added PB for larger sizes
+    units = ["B", "KB", "MB", "GB", "TB", "PB"]
     factor = 1024.0
 
     if size_bytes == 0:
         return "0 B"
 
+    # Iterate through units until the size is less than the next factor of 1024.
     for unit in units:
         if size_bytes < factor:
-            # Format with 2 decimal places for KB and above if not whole number, 0 for B
+            # For bytes, show as an integer. For others, show with two decimal places.
             if unit == "B":
                 return f"{size_bytes} {unit}"
             else:
-                # Example: 1.50 KB, 23.00 MB. Use {:.0f} if no decimals desired for integer results.
-                return f"{size_bytes:.2f} {unit}".replace(
-                    ".00", ""
-                )  # Clean up .00 for whole numbers
+                # Clean up ".00" for whole numbers (e.g., "2.00 MB" -> "2 MB").
+                return f"{size_bytes:.2f} {unit}".replace(".00", "")
         size_bytes /= factor
 
-    # If it's larger than PB, it will return in PB with a large number.
-    # Or, handle exabytes (EB) if needed.
-    return f"{size_bytes:.2f} {units[-1]}".replace(
-        ".00", ""
-    )  # Should be last unit used
+    # If the size is larger than Petabytes, it will be displayed in PB.
+    return f"{size_bytes:.2f} {units[-1]}".replace(".00", "")
 
 
 def contains_any_extensions(
     file_path_obj: Path, extensions_to_check: List[str]
 ) -> bool:
     """
-    Checks if the file path's extension is in the provided list of extensions (case-insensitive).
+    Checks if a file's extension is present in a given list (case-insensitive).
 
     Args:
-        file_path_obj: Path object of the file.
-        extensions_to_check: List of file extensions (e.g., [".txt", ".jpg"]).
-                             Should include the leading dot.
+        file_path_obj: A `pathlib.Path` object for the file to check.
+        extensions_to_check: A list of file extensions, including the leading dot
+                             (e.g., [".mp4", ".mkv"]).
 
     Returns:
         True if the file's extension is in the list, False otherwise.
@@ -79,9 +87,11 @@ def contains_any_extensions(
     if not extensions_to_check:
         return False
 
-    file_extension = file_path_obj.suffix.lower()  # Get ".ext" and lowercase it
+    # Get the file's extension (e.g., ".mp4") and convert to lowercase.
+    file_extension = file_path_obj.suffix.lower()
 
-    # Normalize extensions_to_check to be lowercase and have leading dot
+    # Normalize the list of extensions to ensure they are all lowercase and have a leading dot.
+    # Using a set provides faster lookups.
     normalized_extensions = {
         ext.lower() if ext.startswith(".") else f".{ext.lower()}"
         for ext in extensions_to_check
@@ -92,34 +102,36 @@ def contains_any_extensions(
 
 def find_key_in_dictionary(data_dict: Dict[str, Any], target_key: str) -> Any | None:
     """
-    Recursively searches for a `target_key` in a nested dictionary.
+    Recursively searches for a `target_key` within a nested dictionary.
+
+    This is useful for extracting a specific piece of data from a complex,
+    nested structure like the JSON output from ffprobe.
 
     Args:
         data_dict: The dictionary to search within.
-        target_key: The key to find.
+        target_key: The key whose value you want to find.
 
     Returns:
-        The value of the first found `target_key`, or None if the key is not found
-        or if `data_dict` is not a dictionary.
+        The value of the first `target_key` found, or `None` if the key is not
+        found anywhere in the nested structure.
     """
     if not isinstance(data_dict, dict):
         return None
 
+    # Check if the key exists at the current level.
     if target_key in data_dict:
         return data_dict[target_key]
 
-    for key, value in data_dict.items():
-        # Recursively search in sub-dictionaries
+    # If not, recursively search in any values that are also dictionaries.
+    for value in data_dict.values():
         if isinstance(value, dict):
             found_value = find_key_in_dictionary(value, target_key)
-            if found_value is not None:  # Key found in sub-dictionary
+            if found_value is not None:
                 return found_value
-        # Optionally, search in lists of dictionaries too
+        # Optional: could also be extended to search in lists of dictionaries.
         # elif isinstance(value, list):
         #     for item in value:
         #         if isinstance(item, dict):
-        #             found_in_list = find_key_in_dictionary(item, target_key)
-        #             if found_in_list is not None:
-        #                 return found_in_list
+        #             ...
 
-    return None # Key not found at this level or in any sub-dictionaries
+    return None # Key was not found.

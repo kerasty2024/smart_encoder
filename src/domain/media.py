@@ -16,7 +16,20 @@ from ..config.common import LOAD_FAILED_LOG, LOAD_FAILED_DIR
 
 
 def parse_duration(duration_str: str) -> float:  # Added type hint for duration_str
-    """Parse a duration string formatted as 'HH:MM:SS.sss' or float string into seconds."""
+    """
+    Parses a duration string into total seconds.
+
+    This function is designed to handle two common duration formats provided by ffprobe:
+    1. A simple string representing a floating-point number of seconds (e.g., "3600.5").
+    2. A timecode string in the format 'HH:MM:SS.sss' (e.g., "01:00:00.500").
+       Hours and minutes are optional in the timecode format.
+
+    Args:
+        duration_str: The string containing the duration to parse.
+
+    Returns:
+        The total duration in seconds as a float. Returns 0.0 if parsing fails.
+    """
     try:
         return float(duration_str)
     except ValueError:
@@ -39,14 +52,68 @@ def parse_duration(duration_str: str) -> float:  # Added type hint for duration_
 
 class MediaFile:
     """
-    A class to represent a media file and extract its metadata.
+    Represents a single media file and provides a clean interface to its metadata.
+
+    This class is a core component of the domain layer. When instantiated with a
+    file path, it automatically uses `ffprobe` (via the ffmpeg-python library)
+    to analyze the file. It then populates its attributes with essential
+    information like duration, streams (video, audio, subtitle), codecs,
+    bitrate, and file hashes.
+
+    The primary purpose of this class is to provide a standardized, easy-to-access
+    representation of a media file's properties, abstracting away the complexities
+    of running `ffprobe` and parsing its JSON output.
+
+    If the file cannot be probed or is found to be invalid (e.g., has no duration),
+    the constructor will raise an exception and attempt to move the problematic
+    file to a designated error directory to prevent it from being processed again.
+
+    Attributes:
+        path (Path): The absolute path to the media file.
+        filename (str): The name of the file, including its extension.
+        stem (str): The 'stem' of the filename, correctly handling suffixes like '.!qB'.
+        relative_dir (Path): The file's directory relative to the current working directory.
+        size (int): The size of the file in bytes.
+        probe (dict | None): The raw `ffprobe` output as a nested dictionary. None if probing failed.
+        duration (float): The duration of the media in seconds.
+        comment (str): The comment metadata tag from the file, if present.
+        video_stream_count (int): The number of video streams found.
+        video_streams (list): A list of dictionaries, each representing a video stream.
+        audio_streams (list): A list of dictionaries, each representing an audio stream.
+        subtitle_streams (list): A list of dictionaries, each representing a subtitle stream.
+        vcodec (str): The codec name of the first video stream (e.g., 'h264', 'hevc'), lowercased.
+        vbitrate (int): The bitrate of the first video stream in bits per second.
+        md5 (str): The MD5 hash of the file, used for quick identification.
+        sha256 (str): The SHA256 hash of the file, for more robust integrity checking.
+        load_failed_dir (Path): The directory where this file will be moved if it fails to load.
     """
 
     def __init__(self, path: Path):
         """
-        Initializes the MediaFile object.
+        Initializes the MediaFile object by probing the file at the given path.
 
-        :param path: The file path of the media file as a Path object.
+        This constructor performs several critical initializations:
+        1. Resolves the file path to an absolute path for consistency.
+        2. Gathers basic file system info like size and name.
+        3. Calls `set_probe()` to run `ffprobe` and populates the `probe` attribute.
+        4. If probing is successful, it calls other `set_*` methods to parse the
+           probe data and populate attributes like duration, streams, codecs, etc.
+        5. Calculates file hashes for integrity checks and identification.
+
+        If any critical step fails (like probing or finding a duration), this
+        constructor will call `handle_load_failure()` to move the file to an
+        error directory and then re-raise an appropriate exception to halt
+        further processing of this invalid file.
+
+        Args:
+            path: The `pathlib.Path` object pointing to the media file.
+
+        Raises:
+            FileNotFoundError: If the file does not exist at the given path.
+            NoDurationFoundException: If the media file's duration cannot be determined,
+                                      which is a critical failure.
+            MediaFileException: For other ffmpeg-related errors or unexpected issues
+                                during initialization.
         """
         if not path.exists():
             # This helps catch issues earlier if a file path is incorrect.
@@ -57,6 +124,7 @@ class MediaFile:
 
         self.path: Path = path.resolve()  # Always work with absolute paths internally
         self.filename: str = self.path.name
+        self.stem: str = self._get_clean_stem()
         # Ensure CWD is what's expected or pass a base_path argument
         try:
             self.relative_dir: Path = self.path.parent.relative_to(Path.cwd())
@@ -131,10 +199,26 @@ class MediaFile:
             self.handle_load_failure(reason="UnexpectedInitError")
             raise MediaFileException(f"Unexpected error for {self.path}: {e}") from e
 
+    def _get_clean_stem(self) -> str:
+        """
+        Gets the 'stem' of the filename, correctly handling multi-part extensions
+        like '.mkv.!qB'.
+        """
+        name = self.filename
+        # First, remove known temporary suffixes like .!qB
+        if name.lower().endswith(".!qb"):
+            name = name[:-4]
+
+        # Now, use pathlib's stem on the potentially cleaned name
+        return Path(name).stem
+
     def set_hashes(self):
         """
         Calculates and sets the MD5 and SHA256 hashes of the file.
-        Only attempts if the file still exists at self.path.
+
+        This method reads the file in binary mode to compute the hashes. It is
+        called during initialization. If the file has been moved or deleted
+        before this method is called, it will log a warning and do nothing.
         """
         if not self.path.exists():
             logger.warning(
@@ -153,8 +237,12 @@ class MediaFile:
 
     def set_probe(self):
         """
-        Probes the media file using ffmpeg to extract metadata.
-        If probing fails, calls handle_load_failure which moves the file.
+        Probes the media file using `ffmpeg.probe` to extract all metadata.
+
+        The result, a large nested dictionary, is stored in `self.probe`.
+        If probing fails with an `ffmpeg.Error`, this method sets `self.probe`
+        to None and re-raises the exception to be handled by the constructor,
+        which will then trigger `handle_load_failure`.
         """
         if (
             not self.path.exists()
@@ -177,9 +265,16 @@ class MediaFile:
 
     def handle_load_failure(self, reason: str = "UnknownProbeFailure"):
         """
-        Handles the case where probing or initializing the media file fails.
-        Moves the file to an error directory and logs the failure.
-        The file at self.path is moved, so self.path becomes invalid afterwards.
+        Handles cases where probing or initializing the media file fails.
+
+        This crucial error-handling function moves the problematic file from its
+        original location to a designated error directory (`load_failed`).
+        This prevents the application from repeatedly trying to process a file
+        that is corrupted, unreadable, or otherwise invalid. It also logs the
+        original and new paths to a text file for later review.
+
+        Args:
+            reason: A short string explaining why the failure occurred.
         """
         if not self.path.exists():
             logger.warning(
@@ -234,8 +329,20 @@ class MediaFile:
 
     def get_unique_path(self, directory: Path) -> Path:
         """
-        Generates a unique file path in the specified directory by appending a numeric suffix if needed.
-        (This seems to be a general utility, perhaps could be in a utils module if used elsewhere)
+        Generates a unique file path in a target directory.
+
+        If a file with the same name already exists in the `directory`, this
+        method appends a numeric suffix (e.g., `_1`, `_2`) to the filename
+        until a unique path is found.
+
+        Args:
+            directory: The target directory where the file should be placed.
+
+        Returns:
+            A `pathlib.Path` object representing a unique file path.
+
+        Raises:
+            RuntimeError: If a unique path cannot be found after many attempts.
         """
         target_path = directory / self.path.name
         if not target_path.exists():
@@ -261,7 +368,14 @@ class MediaFile:
     def set_duration(self):
         """
         Sets the duration of the media file from the probe data.
-        Raises NoDurationFoundException if duration cannot be determined.
+
+        It first looks for the duration in the 'format' section of the probe
+        data, which is the most reliable source. If not found, it checks
+        individual streams. As a last resort, it calls a helper method to
+        calculate duration from frame count and frame rate.
+
+        Raises:
+            NoDurationFoundException: If a valid, positive duration cannot be determined.
         """
         if not self.probe:  # Should have been checked by constructor
             logger.error(
@@ -302,8 +416,15 @@ class MediaFile:
 
     def _calculate_duration_from_video_stream_data(self) -> float:
         """
-        Tries to calculate duration from video stream's nb_frames and avg_frame_rate.
-        This is a fallback if the 'duration' field is not directly available.
+        Calculates duration as a fallback using video frame count and frame rate.
+
+        This method is less reliable than reading the duration tag directly but
+        can provide a reasonable estimate if the primary 'duration' field is
+
+        missing from the ffprobe output.
+
+        Returns:
+            The calculated duration in seconds, or 0.0 if calculation is not possible.
         """
         if not self.probe or "streams" not in self.probe:
             return 0.0
@@ -351,7 +472,9 @@ class MediaFile:
 
     def set_comment(self):
         """
-        Sets the comment from the probe data.
+        Extracts and sets the 'comment' metadata tag from the probe data.
+
+        This is used to check if a file has already been processed by this application.
         """
         if not self.probe:
             return
@@ -361,7 +484,7 @@ class MediaFile:
 
     def set_video_stream_count(self):
         """
-        Counts the number of video streams in the media file.
+        Counts and sets the number of video streams found in the media file.
         """
         if not self.probe:
             return
@@ -376,7 +499,7 @@ class MediaFile:
 
     def set_vcodec(self):
         """
-        Sets the video codec from the probe data (first video stream).
+        Finds the first video stream and sets its codec name, lowercased.
         """
         if not self.probe:
             return
@@ -389,8 +512,12 @@ class MediaFile:
 
     def set_vbitrate(self):
         """
-        Sets the video bitrate from the probe data (first video stream) or calculates it.
-        Bitrate in bps.
+
+        Sets the video bitrate (in bps) from the first video stream's probe data.
+
+        If the 'bit_rate' field is not available directly in the stream data,
+        it calculates an approximate overall bitrate for the file by dividing
+        the total file size by its duration.
         """
         if not self.probe:
             return
@@ -430,7 +557,10 @@ class MediaFile:
 
     def set_streams(self):
         """
-        Categorizes the streams into video, audio, and subtitle streams.
+        Iterates through all streams in the probe data and categorizes them.
+
+        Populates the `self.video_streams`, `self.audio_streams`, and
+        `self.subtitle_streams` lists with the corresponding stream dictionaries.
         """
         if not self.probe or "streams" not in self.probe:
             return
@@ -450,7 +580,7 @@ class MediaFile:
             elif codec_type not in {
                 "data",
                 "attachment",
-            }: # Common non-A/V stream types to ignore silently
+            }:  # Common non-A/V stream types to ignore silently
                 logger.warning(
                     f"Other type of stream found in {self.filename} (type: {codec_type}):\n{pformat(stream)}"
                 )
